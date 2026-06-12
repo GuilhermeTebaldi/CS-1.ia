@@ -209,6 +209,13 @@ export default function App() {
     joinedPlayersRef.current = joinedPlayers;
   }, [joinedPlayers]);
 
+  const [isDead, setIsDead] = useState(false);
+  const [showDeathMenu, setShowDeathMenu] = useState(false);
+  const [countdownVal, setCountdownVal] = useState<number | null>(null);
+  const isDeadRef = useRef(false);
+  const isLoopingRef = useRef(false);
+  const handleRespawnRef = useRef<() => void>();
+
   // Update client-side local health representation
   useEffect(() => {
     stateRef.current.health = localHealth;
@@ -259,6 +266,10 @@ export default function App() {
         setJoinedPlayers(data.players);
         setLocalHealth(100);
         stateRef.current.health = 100;
+        setIsDead(false);
+        isDeadRef.current = false;
+        setShowDeathMenu(false);
+        setCountdownVal(null);
         setInGame(true);
         setJoinError('');
       } else {
@@ -385,6 +396,10 @@ export default function App() {
     setJoinedPlayers({});
     setRoomCodeInput('');
     setPointerLocked(false);
+    setIsDead(false);
+    isDeadRef.current = false;
+    setShowDeathMenu(false);
+    setCountdownVal(null);
     document.exitPointerLock?.();
   };
 
@@ -486,6 +501,10 @@ export default function App() {
 
     setLocalHealth(100);
     stateRef.current.health = 100;
+    setIsDead(false);
+    isDeadRef.current = false;
+    setShowDeathMenu(false);
+    setCountdownVal(null);
     
     // Spawn player at coordinates
     stateRef.current.x = (Math.random() * 6) - 3;
@@ -501,10 +520,47 @@ export default function App() {
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
+  const handleRestartGameSequence = () => {
+    setCountdownVal(3);
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    
+    const playTickSound = (freq: number) => {
+      try {
+        const osc = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        osc.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        osc.frequency.setValueAtTime(freq, audioContext.currentTime);
+        gainNode.gain.setValueAtTime(0.12, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15);
+        osc.start();
+        osc.stop(audioContext.currentTime + 0.18);
+      } catch (err) {}
+    };
+
+    playTickSound(650);
+
+    let currentCount = 3;
+    const interval = setInterval(() => {
+      currentCount -= 1;
+      if (currentCount > 0) {
+        setCountdownVal(currentCount);
+        playTickSound(650);
+      } else {
+        clearInterval(interval);
+        setCountdownVal(null);
+        playTickSound(1100);
+        
+        handleRespawnRef.current?.();
+      }
+    }, 1000);
+  };
+
   // Main 3D Canvas Lifecycle & Render Loop
   useEffect(() => {
     if (!inGame || !canvasRef.current) return;
 
+    isLoopingRef.current = true;
     const canvas = canvasRef.current;
     
     // Smoke particles and bullet decals list containers
@@ -589,6 +645,43 @@ export default function App() {
     // Enable realistic shadow mapping
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    handleRespawnRef.current = () => {
+      const rx = (Math.random() * 6) - 3;
+      const rz = (Math.random() * 6) + 12;
+      camera.position.set(rx, 1.6, rz);
+      camera.rotation.set(0, 0, 0);
+      stateRef.current.vy = 0;
+      stateRef.current.yaw = 0;
+      stateRef.current.pitch = 0;
+      stateRef.current.health = 100;
+      setLocalHealth(100);
+      setIsDead(false);
+      isDeadRef.current = false;
+      setShowDeathMenu(false);
+
+      if (currentRoom === 'TREINO') {
+        setJoinedPlayers(prev => {
+          const copy = { ...prev };
+          if (copy['dummy1']) {
+            copy['dummy1'].health = 100;
+            copy['dummy1'].x = -12;
+            copy['dummy1'].z = -18;
+          }
+          if (copy['dummy2']) {
+            copy['dummy2'].health = 100;
+            copy['dummy2'].x = 12;
+            copy['dummy2'].z = -24;
+          }
+          return copy;
+        });
+      } else {
+        if (socketRef.current) {
+          socketRef.current.emit('player:respawn');
+        }
+      }
+      safeRequestPointerLock(canvas);
+    };
 
     // Handle Window Resize via ResizeObserver to support split screens or canvas shifts seamlessly
     const resizeObserver = new ResizeObserver(() => {
@@ -1375,6 +1468,7 @@ export default function App() {
     let syncThrottleCounter = 0;
 
     const gameLoop = () => {
+      if (!isLoopingRef.current) return;
       const now = performance.now();
       const dt = Math.min((now - lastTime) / 1000, 0.1); // caps maximum delta frame to prevent clipping on freeze
       lastTime = now;
@@ -1404,39 +1498,61 @@ export default function App() {
         const speed = 7.5;
         const finalDisplacement = translationForce.multiplyScalar(speed * dt);
 
-        // Apply moving displacement to camera coordinate
-        const nextX = camera.position.x + finalDisplacement.x;
-        const nextZ = camera.position.z + finalDisplacement.z;
-
         // Boundary Clamp inside Arena (floor is 62x62 boundary walls at 31)
         const arenaLimit = 29.8;
-        let clampedX = Math.max(-arenaLimit, Math.min(arenaLimit, nextX));
-        let clampedZ = Math.max(-arenaLimit, Math.min(arenaLimit, nextZ));
+        const playerRadius = 0.45;
 
-        // Simple Obstacle Collision Resolution Checks
-        const playerRadius = 0.5;
-        const futureBox = new THREE.Box3(
-          new THREE.Vector3(clampedX - playerRadius, camera.position.y - 1.6, clampedZ - playerRadius),
-          new THREE.Vector3(clampedX + playerRadius, camera.position.y + 0.4, clampedZ + playerRadius)
+        // Axis-separated movement and collision resolution for perfect wall sliding & clipping prevention
+        // 1. Move and resolve on X axis
+        let currentX = camera.position.x;
+        let originalX = currentX;
+        let targetX = currentX + finalDisplacement.x;
+        let clampedX = Math.max(-arenaLimit, Math.min(arenaLimit, targetX));
+
+        let futureBoxX = new THREE.Box3(
+          new THREE.Vector3(clampedX - playerRadius, camera.position.y - 1.6, camera.position.z - playerRadius),
+          new THREE.Vector3(clampedX + playerRadius, camera.position.y + 0.4, camera.position.z + playerRadius)
         );
 
-        obstacles.forEach(({ box }) => {
-          if (futureBox.intersectsBox(box)) {
-            // Solve collision by pushing back players on the intersecting axis
-            const overlapX = Math.min(futureBox.max.x - box.min.x, box.max.x - futureBox.min.x);
-            const overlapZ = Math.min(futureBox.max.z - box.min.z, box.max.z - futureBox.min.z);
-
-            if (overlapX < overlapZ) {
-              if (camera.position.x < box.min.x) clampedX -= overlapX;
-              else clampedX += overlapX;
+        for (let i = 0; i < obstacles.length; i++) {
+          const { box } = obstacles[i];
+          if (futureBoxX.intersectsBox(box)) {
+            const overlapX = Math.min(futureBoxX.max.x - box.min.x, box.max.x - futureBoxX.min.x);
+            if (originalX < box.min.x) {
+              clampedX -= (overlapX + 0.01);
             } else {
-              if (camera.position.z < box.min.z) clampedZ -= overlapZ;
-              else clampedZ += overlapZ;
+              clampedX += (overlapX + 0.01);
             }
+            futureBoxX.min.x = clampedX - playerRadius;
+            futureBoxX.max.x = clampedX + playerRadius;
           }
-        });
-
+        }
         camera.position.x = clampedX;
+
+        // 2. Move and resolve on Z axis
+        let currentZ = camera.position.z;
+        let originalZ = currentZ;
+        let targetZ = currentZ + finalDisplacement.z;
+        let clampedZ = Math.max(-arenaLimit, Math.min(arenaLimit, targetZ));
+
+        let futureBoxZ = new THREE.Box3(
+          new THREE.Vector3(camera.position.x - playerRadius, camera.position.y - 1.6, clampedZ - playerRadius),
+          new THREE.Vector3(camera.position.x + playerRadius, camera.position.y + 0.4, clampedZ + playerRadius)
+        );
+
+        for (let i = 0; i < obstacles.length; i++) {
+          const { box } = obstacles[i];
+          if (futureBoxZ.intersectsBox(box)) {
+            const overlapZ = Math.min(futureBoxZ.max.z - box.min.z, box.max.z - futureBoxZ.min.z);
+            if (originalZ < box.min.z) {
+              clampedZ -= (overlapZ + 0.01);
+            } else {
+              clampedZ += (overlapZ + 0.01);
+            }
+            futureBoxZ.min.z = clampedZ - playerRadius;
+            futureBoxZ.max.z = clampedZ + playerRadius;
+          }
+        }
         camera.position.z = clampedZ;
 
         // Leaping Jumping Mechanics and downward gravity
@@ -1462,6 +1578,7 @@ export default function App() {
         camera.rotation.order = 'YXZ';
         camera.rotation.y = stateRef.current.yaw;
         camera.rotation.x = stateRef.current.pitch;
+        camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, 0, 10 * dt);
 
         // Clean fluid weapon bobbing and sway based on walk/idle state
         const isWalking = translationForce.lengthSq() > 0.0001;
@@ -1476,9 +1593,20 @@ export default function App() {
         localWeaponGroup.position.y = THREE.MathUtils.lerp(localWeaponGroup.position.y, targetSwayY, 10 * dt);
         localWeaponGroup.position.z = THREE.MathUtils.lerp(localWeaponGroup.position.z, -0.38, 12 * dt);
       } else {
-        // If local player is dead, pan camera state looking up at sky or lower to ground
-        camera.position.y = THREE.MathUtils.lerp(camera.position.y, 0.4, 5 * dt);
-        camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, -Math.PI / 4, 3 * dt);
+        // Drop camera on the floor (standingY = 1.6 -> camera.position.y -> 0.35)
+        camera.position.y = THREE.MathUtils.lerp(camera.position.y, 0.35, 4 * dt);
+        camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, Math.PI / 4.5, 3 * dt);
+        camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, -0.2, 3 * dt);
+
+        if (!isDeadRef.current) {
+          isDeadRef.current = true;
+          setIsDead(true);
+          document.exitPointerLock?.();
+          
+          setTimeout(() => {
+            setShowDeathMenu(true);
+          }, 1500);
+        }
       }
 
       // Rotate, rise, shrink, and fade out muzzle smoke particles with thermal draft
@@ -1756,6 +1884,7 @@ export default function App() {
 
     // Clean up Three.js objects of the room on component shift/unmount
     return () => {
+      isLoopingRef.current = false;
       cancelAnimationFrame(animFrameId);
       resizeObserver.disconnect();
       socketRef.current?.off('player:shoot', handleRemoteVisualShoot);
@@ -1983,212 +2112,159 @@ export default function App() {
           )}
 
           {/* TACTICAL ESCAPE / PAUSED GAME MENU OVERLAY (WHEN UNLOCKED) */}
-          {!pointerLocked && (
+          {!pointerLocked && !isDead && !showDeathMenu && countdownVal === null && (
             <div 
               id="pointer-lock-overlay" 
-              className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-4 sm:p-6 text-center z-30 transition-all backdrop-blur-md"
+              className="absolute inset-0 bg-slate-950/85 flex flex-col items-center justify-center p-4 sm:p-6 text-center z-30 transition-all backdrop-blur-sm"
               onClick={() => {
-                // If they click the backdrop, request pointer lock to continue
                 safeRequestPointerLock(canvasRef.current);
               }}
             >
               <div 
                 id="esc-menu-card" 
-                className="max-w-2xl w-full bg-slate-900/95 border-2 border-slate-700/70 rounded-2xl p-5 sm:p-6 shadow-2xl flex flex-col gap-5 text-left divide-y divide-slate-800 relative animate-fade-in cursor-default"
+                className="max-w-xs w-full bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl flex flex-col gap-4 text-left animate-fade-in cursor-default"
                 onClick={(e) => {
-                  // VERY IMPORTANT: Prevent clicks inside the menu card from auto-capturing mouse pointer
                   e.stopPropagation();
                 }}
               >
-                
                 {/* MENU HEADER */}
-                <div id="esc-menu-header" className="flex items-center justify-between pb-2">
-                  <div className="flex items-center gap-2.5">
-                    <Sliders className="w-5 h-5 text-rose-500 animate-pulse" />
-                    <div>
-                      <h3 className="text-base font-black text-white tracking-widest uppercase">MENU DE PAUSA</h3>
-                      <p className="text-[10px] text-slate-400 font-semibold uppercase">Modo: {currentRoom === 'TREINO' ? 'Prática Offline' : 'Sala de Rede LAN'}</p>
-                    </div>
-                  </div>
-                  
-                  {/* Status indicator */}
-                  <div className="flex items-center gap-2 bg-slate-950/80 px-3 py-1.5 rounded-lg border border-slate-800 text-[10px] uppercase tracking-wider font-bold text-amber-400">
-                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
-                    <span>JOGO PAUSADO</span>
-                  </div>
+                <div id="esc-menu-header" className="flex items-center justify-between">
+                  <h3 className="text-sm font-black text-white tracking-widest uppercase flex items-center gap-1.5">
+                    <Sliders className="w-4 h-4 text-rose-500" /> PAUSA
+                  </h3>
+                  <span className="text-[9px] text-rose-400 font-bold tracking-wider bg-rose-950/40 border border-rose-900/40 px-2 py-0.5 rounded-md uppercase">
+                    {currentRoom === 'TREINO' ? 'Treino' : 'Rede'}
+                  </span>
                 </div>
 
-                {/* TWO-COLUMN GRID: CONFIGURATIONS AND STATS */}
-                <div id="esc-menu-body" className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-4">
-                  
-                  {/* LEFT COLUMN: CONTROLS & UTILITIES */}
-                  <div className="space-y-4">
-                    <h4 className="text-xs font-bold text-indigo-400 uppercase tracking-widest border-b border-slate-800/60 pb-1.5 flex items-center gap-1">
-                      <Sliders className="w-3.5 h-3.5" /> Ajustes do Soldado
-                    </h4>
-
-                    {/* SLIDER: MOUSE SENSITIVITY */}
-                    <div id="sensitivity-slider-group" className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 space-y-1.5">
-                      <div className="flex justify-between items-center text-xs text-slate-300 font-bold">
-                        <span>Sensibilidade do Mouse</span>
-                        <span className="font-mono text-indigo-400 text-xs bg-indigo-950/50 px-2 py-0.5 rounded border border-indigo-900/35">
-                          {mouseSensitivity.toFixed(1)}x
-                        </span>
-                      </div>
-                      <input 
-                        id="sensitivity-range"
-                        type="range"
-                        min="0.5"
-                        max="6.0"
-                        step="0.1"
-                        value={mouseSensitivity}
-                        onChange={(e) => setMouseSensitivity(parseFloat(e.target.value))}
-                        className="w-full accent-indigo-500 bg-slate-800 h-1.5 rounded-lg appearance-none cursor-pointer"
-                      />
-                      <p className="text-[10px] text-slate-500 font-medium">Arraste para ajustar o controle de rotação e mira do soldado.</p>
+                <div className="space-y-3">
+                  {/* SLIDER: MOUSE SENSITIVITY */}
+                  <div className="bg-slate-950/20 p-2.5 rounded-xl border border-slate-800/60 space-y-1">
+                    <div className="flex justify-between items-center text-[10px] text-slate-300 font-bold uppercase tracking-wider">
+                      <span>Sensibilidade</span>
+                      <span className="font-mono text-indigo-400">
+                        {mouseSensitivity.toFixed(1)}x
+                      </span>
                     </div>
+                    <input 
+                      id="sensitivity-range"
+                      type="range"
+                      min="0.5"
+                      max="6.0"
+                      step="0.1"
+                      value={mouseSensitivity}
+                      onChange={(e) => setMouseSensitivity(parseFloat(e.target.value))}
+                      className="w-full accent-indigo-500 bg-slate-800 h-1 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
 
-                    {/* TOGGLE: SOUND MUTE */}
-                    <div id="mute-toggle-group" className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <span className="text-xs text-slate-300 font-bold block">Efeitos de Som</span>
-                        <span className="text-[10px] text-slate-500 font-medium block">Habilitar áudio procedural da arma e tiros</span>
-                      </div>
-                      <button
-                        id="btn-toggle-sound"
-                        type="button"
-                        onClick={() => setSoundMutedState(!soundMutedState)}
-                        className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 border transition-all ${
-                          soundMutedState 
-                            ? 'bg-rose-950/50 border-rose-500/40 text-rose-400' 
-                            : 'bg-emerald-950/40 border-emerald-500/30 text-emerald-400'
-                        }`}
-                      >
-                        {soundMutedState ? (
-                          <>
-                            <VolumeX className="w-4 h-4 text-rose-400" />
-                            MUTADO
-                          </>
-                        ) : (
-                          <>
-                            <Volume2 className="w-4 h-4 text-emerald-400" />
-                            SOMS ATIVOS
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {/* CHANGE NAME IN-GAME */}
-                    <div id="paused-rename-group" className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 space-y-2">
-                      <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Mudar Apelido da Sessão</label>
-                      <input 
-                        id="paused-rename-input"
-                        type="text"
-                        value={playerName}
-                        onChange={(e) => handleNameChange(e.target.value)}
-                        placeholder="Novo nome..."
-                        className="w-full bg-slate-900 border border-slate-700/60 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                      />
-                    </div>
-
-                    {/* TACTICAL RESPAWN / FULL HEAL CHEAT BUTTON */}
+                  {/* TOGGLE: SOUND MUTE */}
+                  <div className="bg-slate-950/20 p-2.5 rounded-xl border border-slate-800/60 flex items-center justify-between">
+                    <span className="text-[10px] text-slate-350 font-bold uppercase tracking-wider">Efeitos de Som</span>
                     <button
-                      id="btn-revive-instantly"
+                      id="btn-toggle-sound"
                       type="button"
-                      onClick={() => {
-                        // Safe teleport respawn and health restoration
-                        stateRef.current.x = (Math.random() * 6) - 3;
-                        stateRef.current.z = (Math.random() * 6) + 12;
-                        stateRef.current.health = 100;
-                        setLocalHealth(100);
-                        playEliminationSound();
-                        
-                        // If offline bots exist, restore their health too for refreshing targets!
-                        if (currentRoom === 'TREINO') {
-                          setJoinedPlayers(prev => {
-                            const updated = { ...prev };
-                            if (updated['dummy1']) updated['dummy1'].health = 100;
-                            if (updated['dummy2']) updated['dummy2'].health = 105; // sergeant extra beef
-                            return updated;
-                          });
-                        }
-                      }}
-                      className="w-full bg-slate-850 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/70 hover:border-slate-500 py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                      onClick={() => setSoundMutedState(!soundMutedState)}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold transition-all border ${
+                        soundMutedState 
+                          ? 'bg-rose-950/50 border-rose-500/30 text-rose-400' 
+                          : 'bg-emerald-950/40 border-emerald-500/30 text-emerald-400'
+                      }`}
                     >
-                      <RefreshCw className="w-3.5 h-3.5 text-rose-500 animate-spin" style={{ animationDuration: '4s' }} />
-                      Reviver / Auto-Cura Completa
+                      {soundMutedState ? 'MUTADO' : 'ATIVO'}
                     </button>
                   </div>
 
-                  {/* RIGHT COLUMN: REAL-TIME PLACAR / STATS */}
-                  <div className="space-y-3.5">
-                    <h4 className="text-xs font-bold text-rose-400 uppercase tracking-widest border-b border-slate-800/60 pb-1.5 flex items-center gap-1">
-                      <Award className="w-3.5 h-3.5" /> Estatísticas do Placar
-                    </h4>
-
-                    {/* COMPACT BOARD TABLE */}
-                    <div id="esc-placar-wrapper" className="bg-slate-950/65 rounded-xl border border-slate-800/80 p-2 overflow-y-auto max-h-[190px]">
-                      <table className="w-full text-left text-[11px]">
-                        <thead>
-                          <tr className="text-slate-500 border-b border-slate-800 pb-1.5 uppercase font-bold tracking-wider text-[9px]">
-                            <th className="pb-1.5 pl-1">Jogador</th>
-                            <th className="pb-1.5 text-center">ELIMS</th>
-                            <th className="pb-1.5 text-center">MORTES</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/30">
-                          {Object.values(joinedPlayers)
-                            .sort((a: any, b: any) => b.kills - a.kills)
-                            .map((p: any) => (
-                              <tr key={p.id} className={`hover:bg-slate-800/20 ${p.id === localPlayerId ? 'bg-indigo-950/15 font-bold' : ''}`}>
-                                <td className="py-2 pl-1 flex items-center gap-1.5">
-                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
-                                  <span className="text-slate-200 truncate max-w-[100px]">{p.name} {p.id === localPlayerId ? '(Você)' : ''}</span>
-                                </td>
-                                <td className="py-2 text-center text-emerald-400 font-mono font-bold">{p.kills}</td>
-                                <td className="py-2 text-center text-rose-400 font-mono">{p.deaths}</td>
-                              </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div id="esc-network-info" className="bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 text-[10px] text-slate-400 leading-relaxed space-y-1.5">
-                      <div className="flex justify-between">
-                        <span>Código da Sala:</span>
-                        <span className="font-mono font-bold text-white bg-slate-800 px-1.5 py-0.5 rounded">{currentRoom}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Total de COMBATENTES:</span>
-                        <span className="font-bold text-rose-400">{Object.keys(joinedPlayers).length}</span>
-                      </div>
+                  {/* SKIN DA ARMA */}
+                  <div className="bg-slate-950/20 p-2.5 rounded-xl border border-slate-800/60 space-y-1.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Camuflagem da Arma</span>
+                    <div className="grid grid-cols-4 gap-1">
+                      {(['classic', 'gold', 'arctic', 'rust'] as const).map(sk => (
+                        <button
+                          key={sk}
+                          type="button"
+                          onClick={() => setSelectedSkin(sk)}
+                          className={`py-1 rounded-md font-bold text-[9px] uppercase border transition-all ${
+                            selectedSkin === sk
+                              ? 'bg-indigo-600 border-indigo-400 text-white shadow'
+                              : 'bg-slate-950 border-slate-800/80 text-slate-500 hover:text-slate-300'
+                          }`}
+                        >
+                          {sk === 'classic' ? 'Padrão' : sk === 'gold' ? 'Ouro' : sk === 'arctic' ? 'Gelo' : 'Rust'}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>
 
                 {/* BOTTOM PRIMARY BUTTONS ROW */}
-                <div id="esc-menu-footer" className="flex flex-col sm:flex-row gap-3 pt-4 justify-between">
-                  {/* BUTTON: LEAVE GAMES */}
+                <div id="esc-menu-footer" className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-800/60">
                   <button
                     id="btn-esc-leave"
                     type="button"
                     onClick={leaveGame}
-                    className="bg-rose-950/40 hover:bg-rose-950/80 border border-rose-800/60 hover:border-rose-600 px-5 py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-rose-400 hover:text-white transition-all duration-150 flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                    className="bg-slate-950/50 hover:bg-rose-950/40 border border-slate-800 hover:border-rose-900/60 py-2.5 rounded-lg font-bold text-[10px] uppercase tracking-wider text-slate-400 hover:text-rose-400 transition-all duration-150 flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <LogOut className="w-4 h-4" /> Sair da Partida / Lobby
+                    <LogOut className="w-3 h-3" /> SAIR
                   </button>
 
-                  {/* BUTTON: RESUME / CAPTURE */}
                   <button
                     id="btn-esc-resume"
                     type="button"
                     onClick={() => {
                       safeRequestPointerLock(canvasRef.current);
                     }}
-                    className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs uppercase tracking-widest py-3 px-6 rounded-xl transition-all duration-150 shadow-md shadow-emerald-950/30 flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[10px] uppercase tracking-wider py-2.5 rounded-lg transition-all duration-150 flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <Target className="w-4 h-4 animate-spin" style={{ animationDuration: '6s' }} />
-                    Retomar Combate (Clique aqui)
+                    <Target className="w-3 h-3" /> RETOMAR
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* DYNAMIC COUNTDOWN SCREEN OVERLAY */}
+          {countdownVal !== null && (
+            <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center z-50">
+              <span className="text-[10px] uppercase tracking-widest text-slate-500 font-extrabold mb-4 animate-pulse">PREPARAR COMBATE</span>
+              <div className="text-8xl font-black font-mono text-indigo-400 select-none animate-ping duration-1000">
+                {countdownVal}
+              </div>
+            </div>
+          )}
+
+          {/* HIGH-FIDELITY GAME OVER SCREEN (TRIGGERED UPON DEATH AFTER TRANSITION) */}
+          {showDeathMenu && countdownVal === null && (
+            <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-4 text-center z-50 animate-fade-in">
+              <div className="max-w-xs w-full bg-slate-900/90 border border-red-950 p-6 rounded-2xl shadow-2xl flex flex-col gap-6 items-center">
+                
+                {/* Visual Accent */}
+                <div className="w-12 h-12 rounded-full bg-red-950/80 border border-red-500/40 flex items-center justify-center text-red-500 animate-pulse">
+                  <Heart className="w-5 h-5" />
+                </div>
+
+                <div className="space-y-1">
+                  <h2 className="text-xl font-black text-rose-500 uppercase tracking-widest leading-none">VOCÊ MORREU</h2>
+                  <p className="text-[10px] text-slate-450 uppercase font-semibold">Tente Novamente no Campo de Batalha</p>
+                </div>
+
+                <div className="w-full space-y-2">
+                  <button
+                    id="btn-restart-game"
+                    type="button"
+                    onClick={handleRestartGameSequence}
+                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs uppercase tracking-widest py-3 rounded-xl transition-all duration-150 shadow-md shadow-emerald-950/20 active:scale-95 cursor-pointer"
+                  >
+                    REINICIAR
+                  </button>
+
+                  <button
+                    id="btn-death-leave"
+                    type="button"
+                    onClick={leaveGame}
+                    className="w-full bg-slate-950/60 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-wider transition-all duration-150 cursor-pointer"
+                  >
+                    SAIR DA PARTIDA
                   </button>
                 </div>
 
