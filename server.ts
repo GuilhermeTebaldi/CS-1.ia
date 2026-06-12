@@ -39,29 +39,11 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
 
 const ARENA_LIMIT = 29.8;
-const PLAYER_RADIUS = 0.45;
 const MAX_PLAYER_Y = 8;
-const POSITION_CORRECTION_THRESHOLD = 1.25;
-const HEIGHT_CORRECTION_THRESHOLD = 1.0;
+const SERVER_SYNC_LIMIT = 30.25;
 const POLICE_COLOR = '#2563eb';
 const THIEF_COLOR = '#dc2626';
 const SPECTATOR_COLOR = '#94a3b8';
-
-const obstacleRects = [
-  { x: 0, z: 0, sx: 6, sz: 6 },
-  { x: -12, z: -12, sx: 2.5, sz: 2.5 },
-  { x: 12, z: 12, sx: 3, sz: 3 },
-  { x: -15, z: 10, sx: 2, sz: 2 },
-  { x: 10, z: -14, sx: 4, sz: 2 },
-  { x: -24, z: -24, sx: 3, sz: 3 },
-  { x: 24, z: -24, sx: 3, sz: 3 },
-  { x: -24, z: 24, sx: 3, sz: 3 },
-  { x: 24, z: 24, sx: 3, sz: 3 },
-  { x: -18, z: -6, sx: 0.95, sz: 0.95 },
-  { x: 18, z: 6, sx: 0.95, sz: 0.95 },
-  { x: -6, z: 18, sx: 0.95, sz: 0.95 },
-  { x: 6, z: -18, sx: 0.95, sz: 0.95 }
-];
 
 const spawnPoints = [
   { x: -22, y: 0, z: 18 },
@@ -135,18 +117,6 @@ function getRandomColor(): string {
   return colors[Math.floor(Math.random() * colors.length)];
 }
 
-function isBlockedXZ(x: number, z: number): boolean {
-  if (x < -ARENA_LIMIT || x > ARENA_LIMIT || z < -ARENA_LIMIT || z > ARENA_LIMIT) {
-    return true;
-  }
-
-  return obstacleRects.some((rect) => {
-    const halfX = rect.sx / 2 + PLAYER_RADIUS;
-    const halfZ = rect.sz / 2 + PLAYER_RADIUS;
-    return x >= rect.x - halfX && x <= rect.x + halfX && z >= rect.z - halfZ && z <= rect.z + halfZ;
-  });
-}
-
 function getSpawnPoint(room?: Room): { x: number; y: number; z: number } {
   const occupied = new Set(
     room ? Object.values(room.players).map((player) => `${Math.round(player.x)}:${Math.round(player.z)}`) : []
@@ -162,33 +132,14 @@ function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: num
     return false;
   }
 
-  const beforeX = player.x;
-  const beforeY = player.y;
-  const beforeZ = player.z;
-  const nextX = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, data.x));
-  const nextZ = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, data.z));
-
-  if (!isBlockedXZ(nextX, player.z)) {
-    player.x = nextX;
-  }
-
-  if (!isBlockedXZ(player.x, nextZ)) {
-    player.z = nextZ;
-  }
-
+  player.x = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, data.x));
   player.y = Math.max(0, Math.min(MAX_PLAYER_Y, data.y));
+  player.z = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, data.z));
   player.yaw = data.yaw;
   player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
   player.isShooting = Boolean(data.isShooting);
 
-  const correctionDistance = Math.hypot(player.x - data.x, player.z - data.z);
-  return (
-    correctionDistance > POSITION_CORRECTION_THRESHOLD ||
-    Math.abs(player.y - data.y) > HEIGHT_CORRECTION_THRESHOLD ||
-    Math.abs(player.x - beforeX) > Math.abs(data.x - beforeX) + POSITION_CORRECTION_THRESHOLD ||
-    Math.abs(player.y - beforeY) > Math.abs(data.y - beforeY) + HEIGHT_CORRECTION_THRESHOLD ||
-    Math.abs(player.z - beforeZ) > Math.abs(data.z - beforeZ) + POSITION_CORRECTION_THRESHOLD
-  );
+  return Math.abs(player.x - data.x) > 0.001 || Math.abs(player.y - data.y) > 0.001 || Math.abs(player.z - data.z) > 0.001;
 }
 
 function getMatchState(room: Room) {

@@ -138,6 +138,7 @@ const ARENA_LIMIT = 29.8;
 const PLAYER_RADIUS = 0.45;
 const PLAYER_EYE_HEIGHT = 1.6;
 const SERVER_CORRECTION_SNAP_DISTANCE = 1.25;
+const REMOTE_SMOOTHING = 0.28;
 
 const OBSTACLE_SPECS = [
   { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
@@ -1204,6 +1205,9 @@ export default function App() {
       armR: THREE.Mesh;
       lasers: THREE.Line[];
       hitbox: THREE.Mesh; // Invisible simplified direct bbox mesh to cast rays accurately
+      targetPosition: THREE.Vector3;
+      targetYaw: number;
+      targetPitch: number;
       lastX: number;
       lastZ: number;
       walkCycle: number;
@@ -1330,6 +1334,9 @@ export default function App() {
         armR: rightArm, 
         lasers: [], 
         hitbox, 
+        targetPosition: new THREE.Vector3(p.x, p.y + 0.595, p.z),
+        targetYaw: p.yaw,
+        targetPitch: p.pitch,
         lastX: p.x, 
         lastZ: p.z, 
         walkCycle: 0 
@@ -1373,15 +1380,21 @@ export default function App() {
 
         const rm = remotePlayersMeshes[id];
         rm.group.visible = true;
+        rm.targetPosition.set(p.x, p.y + 0.595, p.z);
+        rm.targetYaw = p.yaw;
+        rm.targetPitch = p.pitch;
 
-        // Position remote models with positive standing offset so their boots rest perfectly flat
-        rm.group.position.set(p.x, p.y + 0.595, p.z);
-        rm.group.rotation.y = p.yaw;
-        rm.head.rotation.x = p.pitch;
+        if (rm.group.position.distanceTo(rm.targetPosition) > 4) {
+          rm.group.position.copy(rm.targetPosition);
+        } else {
+          rm.group.position.lerp(rm.targetPosition, REMOTE_SMOOTHING);
+        }
+        rm.group.rotation.y = THREE.MathUtils.lerp(rm.group.rotation.y, rm.targetYaw, REMOTE_SMOOTHING);
+        rm.head.rotation.x = THREE.MathUtils.lerp(rm.head.rotation.x, rm.targetPitch, REMOTE_SMOOTHING);
 
         // Active leg walking animations based on position displacements
-        const dx = p.x - rm.lastX;
-        const dz = p.z - rm.lastZ;
+        const dx = rm.group.position.x - rm.lastX;
+        const dz = rm.group.position.z - rm.lastZ;
         const movementDist = Math.sqrt(dx * dx + dz * dz);
         
         // Use a threshold to detect movement
@@ -1402,8 +1415,8 @@ export default function App() {
           rm.armR.rotation.x += (-Math.PI / 3 - rm.armR.rotation.x) * decayRate;
         }
 
-        rm.lastX = p.x;
-        rm.lastZ = p.z;
+        rm.lastX = rm.group.position.x;
+        rm.lastZ = rm.group.position.z;
 
         // Color flash remote torso red when they trigger weapons
         const bodyMat = rm.body.material as THREE.MeshStandardMaterial;
@@ -1416,7 +1429,7 @@ export default function App() {
         // Project the 3D player tag coordinates to 2D HTML Name Tags perfectly
         const tagEl = document.getElementById(`remote-tag-${id}`);
         if (tagEl) {
-          const projVector = new THREE.Vector3(p.x, p.y + 1.62, p.z); // target right above head level
+          const projVector = new THREE.Vector3(rm.group.position.x, rm.group.position.y + 1.025, rm.group.position.z);
           projVector.project(camera);
           
           // If behind camera view screen, keep hidden
