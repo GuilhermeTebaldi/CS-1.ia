@@ -2376,6 +2376,37 @@ export default function App() {
                   {roundOverlaySubtext}
                 </div>
               )}
+              {(matchState.phase === 'waiting' || !localPlayerState?.isActive) && (
+                <div className="mt-7 flex flex-col items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-[0.3em] text-slate-500 font-black">
+                    Token para entrar
+                  </span>
+                  <button
+                    type="button"
+                    onClick={copyRoomCode}
+                    className="group flex items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-950/35 px-5 py-3 font-mono text-3xl sm:text-5xl font-black tracking-[0.25em] text-rose-300 shadow-xl shadow-rose-950/20 transition-all hover:border-rose-400/60 hover:bg-rose-950/55"
+                    title="Copiar token da sala"
+                  >
+                    <span>{currentRoom}</span>
+                    {copiedCode ? (
+                      <Check className="h-5 w-5 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-5 w-5 text-slate-400 transition-colors group-hover:text-white" />
+                    )}
+                  </button>
+                  <span className="text-xs font-bold text-slate-400">
+                    O outro jogador digita esse código no campo TOKEN.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={leaveGame}
+                    className="mt-3 flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-300 transition-all hover:border-rose-500/60 hover:bg-rose-950/35 hover:text-rose-200"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    Desistir / Voltar
+                  </button>
+                </div>
+              )}
               {matchState.phase === 'live' && (
                 <div className="mt-5 text-5xl font-black text-emerald-400 tracking-widest">GO</div>
               )}
