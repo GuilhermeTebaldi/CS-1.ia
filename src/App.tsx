@@ -1651,13 +1651,7 @@ export default function App() {
         if (hitObj.name && hitObj.name.startsWith('remote-player-hitbox:')) {
           const matchedVictimId = hitObj.name.split(':')[1];
           
-          if (activeRoom !== 'TREINO' && socketRef.current && socketRef.current.connected) {
-            // Register Hit on Target via server!
-            socketRef.current?.emit('player:hit', {
-              victimId: matchedVictimId,
-              damage: 25 // 4 hits to defeat
-            });
-          } else {
+          if (activeRoom === 'TREINO') {
             // Local sandbox mode damage simulation
             setJoinedPlayers(prev => {
               if (!prev[matchedVictimId]) return prev;
@@ -1758,6 +1752,8 @@ export default function App() {
       const activeLocalPlayerId = localPlayerIdRef.current;
       const localPlayerState = joinedPlayersRef.current[activeLocalPlayerId];
       const roundIsLive = activeRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
+      let networkMoveX = 0;
+      let networkMoveZ = 0;
 
       if (stateRef.current.health > 0) {
         // Player locomotion physics (Keyboard reading WASD status)
@@ -1771,6 +1767,8 @@ export default function App() {
         }
 
         moveVector.normalize();
+        networkMoveX = moveVector.x;
+        networkMoveZ = moveVector.z;
 
         // Account for horizontal camera yaw direction
         const currentYaw = stateRef.current.yaw;
@@ -1913,15 +1911,13 @@ export default function App() {
         };
       }
 
-      // Synchronize player position every rendered frame for lower perceived latency.
+      // Send movement intent; server simulates the official position.
       syncThrottleCounter++;
       if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 1) {
         syncThrottleCounter = 0;
-        socketRef.current?.emit('player:sync', {
-          x: stateRef.current.x,
-          // Subtract height offset so player models appear standing nicely flat on top of the grid helper
-          y: stateRef.current.y - 1.6, 
-          z: stateRef.current.z,
+        socketRef.current?.emit('player:input', {
+          moveX: networkMoveX,
+          moveZ: networkMoveZ,
           yaw: stateRef.current.yaw,
           pitch: stateRef.current.pitch,
           isShooting: false

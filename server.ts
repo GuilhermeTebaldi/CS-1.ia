@@ -19,11 +19,22 @@ interface Player {
   color: string;
   kills: number;
   deaths: number;
+  lastInputAt: number;
+}
+
+interface PlayerSnapshot {
+  t: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
 }
 
 interface Room {
   code: string;
   players: Record<string, Player>;
+  history: Record<string, PlayerSnapshot[]>;
   activePlayerIds: string[];
   phase: 'waiting' | 'countdown' | 'live' | 'round_end';
   countdown: number | null;
@@ -41,6 +52,12 @@ const app = express();
 const ARENA_LIMIT = 29.8;
 const MAX_PLAYER_Y = 8;
 const SERVER_SYNC_LIMIT = 30.25;
+const PLAYER_RADIUS = 0.45;
+const MOVE_SPEED = 7.5;
+const HISTORY_MS = 800;
+const LAG_COMPENSATION_MS = 110;
+const HIT_RADIUS = 0.82;
+const MAX_SHOT_DISTANCE = 55;
 const POLICE_COLOR = '#2563eb';
 const THIEF_COLOR = '#dc2626';
 const SPECTATOR_COLOR = '#94a3b8';
@@ -56,6 +73,22 @@ const spawnPoints = [
   { x: 18, y: 0, z: 0 },
   { x: -8, y: 0, z: 22 },
   { x: 8, y: 0, z: -22 }
+];
+
+const obstacleRects = [
+  { x: 0, z: 0, sx: 6, sz: 6 },
+  { x: -12, z: -12, sx: 2.5, sz: 2.5 },
+  { x: 12, z: 12, sx: 3, sz: 3 },
+  { x: -15, z: 10, sx: 2, sz: 2 },
+  { x: 10, z: -14, sx: 4, sz: 2 },
+  { x: -24, z: -24, sx: 3, sz: 3 },
+  { x: 24, z: -24, sx: 3, sz: 3 },
+  { x: -24, z: 24, sx: 3, sz: 3 },
+  { x: 24, z: 24, sx: 3, sz: 3 },
+  { x: -18, z: -6, sx: 0.95, sz: 0.95 },
+  { x: 18, z: 6, sx: 0.95, sz: 0.95 },
+  { x: -6, z: 18, sx: 0.95, sz: 0.95 },
+  { x: 6, z: -18, sx: 0.95, sz: 0.95 }
 ];
 
 // Express CORS middleware to mirror origins and guarantee browser approval
@@ -142,6 +175,191 @@ function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: num
   return true;
 }
 
+function isBlockedXZ(x: number, z: number): boolean {
+  if (x < -ARENA_LIMIT || x > ARENA_LIMIT || z < -ARENA_LIMIT || z > ARENA_LIMIT) {
+    return true;
+  }
+
+  return obstacleRects.some((rect) => {
+    const halfX = rect.sx / 2 + PLAYER_RADIUS;
+    const halfZ = rect.sz / 2 + PLAYER_RADIUS;
+    return x >= rect.x - halfX && x <= rect.x + halfX && z >= rect.z - halfZ && z <= rect.z + halfZ;
+  });
+}
+
+function applyPlayerInput(player: Player, data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }, now = Date.now()) {
+  if (![data.moveX, data.moveZ, data.yaw, data.pitch].every(Number.isFinite)) {
+    return false;
+  }
+
+  const dt = Math.max(0, Math.min(0.05, (now - (player.lastInputAt || now)) / 1000));
+  player.lastInputAt = now;
+  player.yaw = data.yaw;
+  player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
+  player.isShooting = Boolean(data.isShooting);
+
+  const inputLen = Math.hypot(data.moveX, data.moveZ);
+  if (inputLen <= 0.001 || dt <= 0) return true;
+
+  const moveX = data.moveX / Math.max(1, inputLen);
+  const moveZ = data.moveZ / Math.max(1, inputLen);
+  const forward = {
+    x: -Math.sin(player.yaw),
+    z: -Math.cos(player.yaw)
+  };
+  const right = {
+    x: Math.cos(player.yaw),
+    z: -Math.sin(player.yaw)
+  };
+
+  const dx = (right.x * moveX + forward.x * -moveZ) * MOVE_SPEED * dt;
+  const dz = (right.z * moveX + forward.z * -moveZ) * MOVE_SPEED * dt;
+  const nextX = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, player.x + dx));
+  if (!isBlockedXZ(nextX, player.z)) {
+    player.x = nextX;
+  }
+
+  const nextZ = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, player.z + dz));
+  if (!isBlockedXZ(player.x, nextZ)) {
+    player.z = nextZ;
+  }
+
+  return true;
+}
+
+function recordPlayerSnapshot(room: Room, player: Player, t = Date.now()) {
+  if (!room.history[player.id]) {
+    room.history[player.id] = [];
+  }
+
+  const history = room.history[player.id];
+  history.push({
+    t,
+    x: player.x,
+    y: player.y,
+    z: player.z,
+    yaw: player.yaw,
+    pitch: player.pitch
+  });
+
+  while (history.length > 2 && t - history[0].t > HISTORY_MS) {
+    history.shift();
+  }
+}
+
+function getRewoundSnapshot(room: Room, player: Player, targetTime: number): PlayerSnapshot {
+  const history = room.history[player.id] || [];
+  if (history.length === 0) {
+    return {
+      t: targetTime,
+      x: player.x,
+      y: player.y,
+      z: player.z,
+      yaw: player.yaw,
+      pitch: player.pitch
+    };
+  }
+
+  let before = history[0];
+  let after = history[history.length - 1];
+  for (let i = 0; i < history.length; i++) {
+    const sample = history[i];
+    if (sample.t <= targetTime) {
+      before = sample;
+    }
+    if (sample.t >= targetTime) {
+      after = sample;
+      break;
+    }
+  }
+
+  if (before.t === after.t) return before;
+  const alpha = Math.max(0, Math.min(1, (targetTime - before.t) / (after.t - before.t)));
+  return {
+    t: targetTime,
+    x: before.x + (after.x - before.x) * alpha,
+    y: before.y + (after.y - before.y) * alpha,
+    z: before.z + (after.z - before.z) * alpha,
+    yaw: before.yaw + (after.yaw - before.yaw) * alpha,
+    pitch: before.pitch + (after.pitch - before.pitch) * alpha
+  };
+}
+
+function getShotRay(attacker: Player) {
+  const pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, attacker.pitch));
+  const cosPitch = Math.cos(pitch);
+  return {
+    origin: {
+      x: attacker.x,
+      y: attacker.y + 1.6,
+      z: attacker.z
+    },
+    dir: {
+      x: -Math.sin(attacker.yaw) * cosPitch,
+      y: Math.sin(pitch),
+      z: -Math.cos(attacker.yaw) * cosPitch
+    }
+  };
+}
+
+function getRayHitDistance(ray: ReturnType<typeof getShotRay>, snapshot: PlayerSnapshot): number | null {
+  const center = {
+    x: snapshot.x,
+    y: snapshot.y + 1.0,
+    z: snapshot.z
+  };
+  const toTarget = {
+    x: center.x - ray.origin.x,
+    y: center.y - ray.origin.y,
+    z: center.z - ray.origin.z
+  };
+  const alongRay = toTarget.x * ray.dir.x + toTarget.y * ray.dir.y + toTarget.z * ray.dir.z;
+  if (alongRay < 0 || alongRay > MAX_SHOT_DISTANCE) return null;
+
+  const closest = {
+    x: ray.origin.x + ray.dir.x * alongRay,
+    y: ray.origin.y + ray.dir.y * alongRay,
+    z: ray.origin.z + ray.dir.z * alongRay
+  };
+  const dx = center.x - closest.x;
+  const dy = center.y - closest.y;
+  const dz = center.z - closest.z;
+  const distanceToRay = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+  return distanceToRay <= HIT_RADIUS ? alongRay : null;
+}
+
+function rayIntersectsObstacleBefore(ray: ReturnType<typeof getShotRay>, maxDistance: number): boolean {
+  return obstacleRects.some((rect) => {
+    const minX = rect.x - rect.sx / 2;
+    const maxX = rect.x + rect.sx / 2;
+    const minZ = rect.z - rect.sz / 2;
+    const maxZ = rect.z + rect.sz / 2;
+    let tMin = 0;
+    let tMax = maxDistance;
+
+    if (Math.abs(ray.dir.x) < 0.0001) {
+      if (ray.origin.x < minX || ray.origin.x > maxX) return false;
+    } else {
+      const tx1 = (minX - ray.origin.x) / ray.dir.x;
+      const tx2 = (maxX - ray.origin.x) / ray.dir.x;
+      tMin = Math.max(tMin, Math.min(tx1, tx2));
+      tMax = Math.min(tMax, Math.max(tx1, tx2));
+    }
+
+    if (Math.abs(ray.dir.z) < 0.0001) {
+      if (ray.origin.z < minZ || ray.origin.z > maxZ) return false;
+    } else {
+      const tz1 = (minZ - ray.origin.z) / ray.dir.z;
+      const tz2 = (maxZ - ray.origin.z) / ray.dir.z;
+      tMin = Math.max(tMin, Math.min(tz1, tz2));
+      tMax = Math.min(tMax, Math.max(tz1, tz2));
+    }
+
+    return tMax >= tMin && tMin > 0.1 && tMin < maxDistance;
+  });
+}
+
 function getMatchState(room: Room) {
   return {
     phase: room.phase,
@@ -154,46 +372,6 @@ function getMatchState(room: Room) {
   };
 }
 
-function isServerValidatedHit(attacker: Player, victim: Player): boolean {
-  const pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, attacker.pitch));
-  const cosPitch = Math.cos(pitch);
-  const rayOrigin = {
-    x: attacker.x,
-    y: attacker.y + 1.6,
-    z: attacker.z
-  };
-  const rayDir = {
-    x: -Math.sin(attacker.yaw) * cosPitch,
-    y: Math.sin(pitch),
-    z: -Math.cos(attacker.yaw) * cosPitch
-  };
-  const victimCenter = {
-    x: victim.x,
-    y: victim.y + 1.0,
-    z: victim.z
-  };
-
-  const toVictim = {
-    x: victimCenter.x - rayOrigin.x,
-    y: victimCenter.y - rayOrigin.y,
-    z: victimCenter.z - rayOrigin.z
-  };
-  const alongRay = toVictim.x * rayDir.x + toVictim.y * rayDir.y + toVictim.z * rayDir.z;
-  if (alongRay < 0 || alongRay > 55) return false;
-
-  const closest = {
-    x: rayOrigin.x + rayDir.x * alongRay,
-    y: rayOrigin.y + rayDir.y * alongRay,
-    z: rayOrigin.z + rayDir.z * alongRay
-  };
-  const dx = victimCenter.x - closest.x;
-  const dy = victimCenter.y - closest.y;
-  const dz = victimCenter.z - closest.z;
-  const distanceToRay = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-  return distanceToRay <= 0.82;
-}
-
 function emitRoomState(roomCode: string) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -202,6 +380,32 @@ function emitRoomState(roomCode: string) {
     match: getMatchState(room)
   });
   io.in(roomCode).emit('match:state', getMatchState(room));
+}
+
+function applyDamage(roomCode: string, attacker: Player, victim: Player, damage: number) {
+  const room = rooms[roomCode];
+  if (!room || victim.health <= 0) return;
+
+  victim.health = Math.max(0, victim.health - damage);
+  io.in(roomCode).emit('player:health', {
+    id: victim.id,
+    health: victim.health
+  });
+
+  if (victim.health <= 0) {
+    attacker.kills += 1;
+    victim.deaths += 1;
+
+    io.in(roomCode).emit('player:eliminated', {
+      victimId: victim.id,
+      victimName: victim.name,
+      attackerId: attacker.id,
+      attackerName: attacker.name,
+      kills: attacker.kills
+    });
+
+    endRound(roomCode, attacker, victim);
+  }
 }
 
 function setActiveDuel(room: Room, activeIds: string[]) {
@@ -225,6 +429,9 @@ function setActiveDuel(room: Room, activeIds: string[]) {
       player.z = spawn.z;
       player.yaw = index === 0 ? Math.PI : 0;
       player.pitch = 0;
+      player.lastInputAt = Date.now();
+      room.history[player.id] = [];
+      recordPlayerSnapshot(room, player);
     }
   });
 }
@@ -392,6 +599,7 @@ io.on('connection', (socket: Socket) => {
       redScore: 0,
       roundNumber: 0,
       message: 'Aguardando segundo jogador',
+      history: {},
       players: {
         [socket.id]: {
           id: socket.id,
@@ -407,10 +615,12 @@ io.on('connection', (socket: Socket) => {
           isShooting: false,
           color: POLICE_COLOR,
           kills: 0,
-          deaths: 0
+          deaths: 0,
+          lastInputAt: Date.now()
         }
       }
     };
+    recordPlayerSnapshot(rooms[code], rooms[code].players[socket.id]);
 
     socketToRoom[socket.id] = code;
     socket.join(code);
@@ -457,10 +667,12 @@ io.on('connection', (socket: Socket) => {
       isShooting: false,
       color: joinsActiveRound ? (room.activePlayerIds.length === 0 ? POLICE_COLOR : THIEF_COLOR) : SPECTATOR_COLOR,
       kills: 0,
-      deaths: 0
+      deaths: 0,
+      lastInputAt: Date.now()
     };
 
     room.players[socket.id] = newPlayer;
+    recordPlayerSnapshot(room, newPlayer);
     if (joinsActiveRound) {
       room.activePlayerIds.push(socket.id);
     }
@@ -484,17 +696,7 @@ io.on('connection', (socket: Socket) => {
     console.log(`👤 Player ${playerName} joined room ${upperCode}`);
   });
 
-  // Handle position/rotation synchronizations
-  socket.on('player:sync', (data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
-    const roomCode = socketToRoom[socket.id];
-    if (!roomCode || !rooms[roomCode]) return;
-
-    const player = rooms[roomCode].players[socket.id];
-    if (!player) return;
-    if (!player.isActive || rooms[roomCode].phase !== 'live') return;
-
-    if (!sanitizePlayerSync(player, data)) return;
-
+  const broadcastPlayerSnapshot = (roomCode: string, player: Player) => {
     socket.to(roomCode).emit('player:sync', {
       id: socket.id,
       x: player.x,
@@ -504,6 +706,36 @@ io.on('connection', (socket: Socket) => {
       pitch: player.pitch,
       isShooting: player.isShooting
     });
+  };
+
+  // CS-style: client sends movement intent, server owns the official position.
+  socket.on('player:input', (data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }) => {
+    const roomCode = socketToRoom[socket.id];
+    if (!roomCode || !rooms[roomCode]) return;
+
+    const room = rooms[roomCode];
+    const player = room.players[socket.id];
+    if (!player) return;
+    if (!player.isActive || room.phase !== 'live') return;
+
+    if (!applyPlayerInput(player, data)) return;
+    recordPlayerSnapshot(room, player);
+    broadcastPlayerSnapshot(roomCode, player);
+  });
+
+  // Compatibility while old clients finish deploying.
+  socket.on('player:sync', (data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
+    const roomCode = socketToRoom[socket.id];
+    if (!roomCode || !rooms[roomCode]) return;
+
+    const room = rooms[roomCode];
+    const player = room.players[socket.id];
+    if (!player) return;
+    if (!player.isActive || room.phase !== 'live') return;
+
+    if (!sanitizePlayerSync(player, data)) return;
+    recordPlayerSnapshot(room, player);
+    broadcastPlayerSnapshot(roomCode, player);
   });
 
   // Handle shooting trigger visual events
@@ -523,47 +755,33 @@ io.on('connection', (socket: Socket) => {
       yaw: player.yaw,
       pitch: player.pitch
     });
-  });
 
-  // Client-authoritative damage registration (extremely robust for fast web interactions)
-  socket.on('player:hit', (data: { victimId: string; damage: number }) => {
-    const roomCode = socketToRoom[socket.id];
-    if (!roomCode || !rooms[roomCode]) return;
+    const ray = getShotRay(player);
+    const rewindTime = Date.now() - LAG_COMPENSATION_MS;
+    let bestHit: { victim: Player; distance: number } | null = null;
 
-    const room = rooms[roomCode];
-    const victim = room.players[data.victimId];
-    const attacker = room.players[socket.id];
+    room.activePlayerIds.forEach((playerId) => {
+      if (playerId === socket.id) return;
+      const victim = room.players[playerId];
+      if (!victim || !victim.isActive || victim.health <= 0) return;
 
-    if (!victim || !attacker) return;
-    if (room.phase !== 'live' || !victim.isActive || !attacker.isActive) return;
-    if (victim.health <= 0) return; // Already dead
-    if (!isServerValidatedHit(attacker, victim)) return;
-
-    // Reduce health
-    victim.health = Math.max(0, victim.health - data.damage);
-    console.log(`💥 Hit registered: Attacker ${attacker.name} -> Victim ${victim.name} (Health left: ${victim.health})`);
-
-    // Broadcast the update immediately
-    io.in(roomCode).emit('player:health', {
-      id: victim.id,
-      health: victim.health
+      const rewindSnapshot = getRewoundSnapshot(room, victim, rewindTime);
+      const distance = getRayHitDistance(ray, rewindSnapshot);
+      if (distance === null) return;
+      if (rayIntersectsObstacleBefore(ray, distance)) return;
+      if (!bestHit || distance < bestHit.distance) {
+        bestHit = { victim, distance };
+      }
     });
 
-    // Check if dead
-    if (victim.health <= 0) {
-      attacker.kills += 1;
-      victim.deaths += 1;
-
-      io.in(roomCode).emit('player:eliminated', {
-        victimId: victim.id,
-        victimName: victim.name,
-        attackerId: attacker.id,
-        attackerName: attacker.name,
-        kills: attacker.kills
-      });
-
-      endRound(roomCode, attacker, victim);
+    if (bestHit) {
+      applyDamage(roomCode, player, bestHit.victim, 25);
     }
+  });
+
+  // Damage is server-authoritative through player:shoot with lag compensation.
+  socket.on('player:hit', (data: { victimId: string; damage: number }) => {
+    return;
   });
 
   socket.on('player:respawn', () => {
@@ -583,6 +801,9 @@ io.on('connection', (socket: Socket) => {
     player.yaw = 0;
     player.pitch = 0;
     player.isShooting = false;
+    player.lastInputAt = Date.now();
+    room.history[player.id] = [];
+    recordPlayerSnapshot(room, player);
 
     io.in(roomCode).emit('player:respawned', {
       id: player.id,
