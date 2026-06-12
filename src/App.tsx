@@ -147,6 +147,15 @@ type MovementDiagnostic = {
   at: string;
 };
 
+type MovementDebugStatus = {
+  socketId: string;
+  serverBuild: string;
+  lastEvent: string;
+  lastSentSeq: number;
+  lastRecvSeq: string;
+  corrections: number;
+};
+
 const OBSTACLE_SPECS = [
   { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
   { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1c1917' },
@@ -199,6 +208,14 @@ export default function App() {
   const [isScoreboardOpen, setIsScoreboardOpen] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
   const [movementDiagnostics, setMovementDiagnostics] = useState<MovementDiagnostic[]>([]);
+  const [movementDebugStatus, setMovementDebugStatus] = useState<MovementDebugStatus>({
+    socketId: '-',
+    serverBuild: 'aguardando',
+    lastEvent: 'boot',
+    lastSentSeq: 0,
+    lastRecvSeq: '-',
+    corrections: 0
+  });
 
   const [mouseSensitivity, setMouseSensitivity] = useState(2.2);
   const [soundMutedState, setSoundMutedState] = useState(false);
@@ -284,6 +301,14 @@ export default function App() {
   const clientMoveSeqRef = useRef(0);
   const lastCorrectionAtRef = useRef(0);
   const movementDiagnosticsRef = useRef<MovementDiagnostic[]>([]);
+  const movementDebugStatusRef = useRef<MovementDebugStatus>({
+    socketId: '-',
+    serverBuild: 'aguardando',
+    lastEvent: 'boot',
+    lastSentSeq: 0,
+    lastRecvSeq: '-',
+    corrections: 0
+  });
 
   // Update client-side local health representation
   useEffect(() => {
@@ -308,6 +333,14 @@ export default function App() {
     setMovementDiagnostics(movementDiagnosticsRef.current);
   };
 
+  const updateMovementDebugStatus = (patch: Partial<MovementDebugStatus>) => {
+    movementDebugStatusRef.current = {
+      ...movementDebugStatusRef.current,
+      ...patch
+    };
+    setMovementDebugStatus(movementDebugStatusRef.current);
+  };
+
   // Socket setup (only during connection setups)
   useEffect(() => {
     setConnectionStatus('connecting');
@@ -324,12 +357,14 @@ export default function App() {
 
     socket.on('connect', () => {
       console.log("🔌 Conectado ao socket com ID:", socket.id);
+      updateMovementDebugStatus({ socketId: socket.id || '-', lastEvent: 'socket:connect' });
       setConnectionStatus('connected');
       setJoinError('');
     });
 
     socket.on('disconnect', () => {
       console.log("🔌 Desconectado do socket.");
+      updateMovementDebugStatus({ socketId: '-', lastEvent: 'socket:disconnect' });
       setConnectionStatus('disconnected');
     });
 
@@ -355,6 +390,13 @@ export default function App() {
         localPlayerIdRef.current = data.playerId;
         setCurrentRoom(data.roomCode);
         currentRoomRef.current = data.roomCode;
+        updateMovementDebugStatus({
+          socketId: socket.id || data.playerId,
+          serverBuild: 'aguardando',
+          lastEvent: 'room:joined',
+          lastRecvSeq: '-',
+          corrections: 0
+        });
         setJoinedPlayers(data.players);
         setMatchState(data.match || defaultMatchState);
         setLocalHealth(100);
@@ -395,6 +437,11 @@ export default function App() {
 
     const applySyncedPlayer = (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean; clientSeq?: number; serverBuild?: string }) => {
       if (currentRoomRef.current === 'TREINO') return;
+      updateMovementDebugStatus({
+        serverBuild: data.serverBuild || 'legacy',
+        lastEvent: data.id === socket.id ? 'player:sync:self' : 'player:sync:remote',
+        lastRecvSeq: data.clientSeq !== undefined ? String(data.clientSeq) : 'legacy'
+      });
       if (data.id === socket.id) {
         recordMovementDiagnostic('MOV-REMOTE-SELF', `player:sync voltou para o proprio jogador. seq=${data.clientSeq ?? 'legacy'} server=${data.serverBuild || 'legacy'}`);
       }
@@ -429,6 +476,12 @@ export default function App() {
         const now = performance.now();
         const sinceLast = lastCorrectionAtRef.current ? Math.round(now - lastCorrectionAtRef.current) : 0;
         lastCorrectionAtRef.current = now;
+        updateMovementDebugStatus({
+          serverBuild: data.serverBuild || 'legacy',
+          lastEvent: 'player:correction',
+          lastRecvSeq: data.clientSeq !== undefined ? String(data.clientSeq) : 'legacy',
+          corrections: movementDebugStatusRef.current.corrections + 1
+        });
 
         recordMovementDiagnostic(
           distance >= SERVER_CORRECTION_SNAP_DISTANCE ? 'MOV-CORR-SNAP-BLOCKED' : 'MOV-CORR-SMALL-BLOCKED',
@@ -581,6 +634,16 @@ export default function App() {
     setKillFeed([]);
     setMovementDiagnostics([]);
     movementDiagnosticsRef.current = [];
+    clientMoveSeqRef.current = 0;
+    movementDebugStatusRef.current = {
+      socketId: socketRef.current?.id || '-',
+      serverBuild: 'aguardando',
+      lastEvent: 'reset',
+      lastSentSeq: 0,
+      lastRecvSeq: '-',
+      corrections: 0
+    };
+    setMovementDebugStatus(movementDebugStatusRef.current);
     setIsScoreboardOpen(false);
     setPointerLocked(false);
     setIsDead(false);
@@ -1885,6 +1948,13 @@ export default function App() {
       if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 2) {
         syncThrottleCounter = 0;
         clientMoveSeqRef.current += 1;
+        if (clientMoveSeqRef.current % 10 === 0) {
+          updateMovementDebugStatus({
+            lastEvent: 'player:sync:send',
+            lastSentSeq: clientMoveSeqRef.current,
+            socketId: socketRef.current.id || movementDebugStatusRef.current.socketId
+          });
+        }
         socketRef.current?.emit('player:sync', {
           clientSeq: clientMoveSeqRef.current,
           clientRoom: activeRoom,
@@ -2629,22 +2699,36 @@ export default function App() {
             </div>
           </div>
 
-          {isNetworkRoom && movementDiagnostics.length > 0 && (
+          {isNetworkRoom && (
             <div id="movement-diagnostics-panel" className="absolute top-40 right-6 z-40 max-w-sm rounded-xl border border-amber-500/40 bg-slate-950/90 p-3 text-left shadow-xl">
               <div className="mb-2 flex items-center justify-between gap-3 border-b border-amber-500/20 pb-2">
                 <span className="text-[10px] font-black uppercase tracking-widest text-amber-300">Movimento debug</span>
                 <span className="font-mono text-[9px] text-slate-500">{MOVE_DIAGNOSTIC_VERSION}</span>
               </div>
+              <div className="mb-2 grid grid-cols-2 gap-1.5 font-mono text-[9px] text-slate-300">
+                <div className="rounded bg-slate-900/80 px-2 py-1">socket: {movementDebugStatus.socketId.slice(0, 8)}</div>
+                <div className="rounded bg-slate-900/80 px-2 py-1">server: {movementDebugStatus.serverBuild}</div>
+                <div className="rounded bg-slate-900/80 px-2 py-1">send: {movementDebugStatus.lastSentSeq}</div>
+                <div className="rounded bg-slate-900/80 px-2 py-1">recv: {movementDebugStatus.lastRecvSeq}</div>
+                <div className="rounded bg-slate-900/80 px-2 py-1">corr: {movementDebugStatus.corrections}</div>
+                <div className="rounded bg-slate-900/80 px-2 py-1">evt: {movementDebugStatus.lastEvent}</div>
+              </div>
               <div className="space-y-1.5">
-                {movementDiagnostics.map((item, index) => (
-                  <div key={`${item.at}-${item.code}-${index}`} className="rounded-lg bg-slate-900/80 px-2 py-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-[10px] font-black text-amber-300">{item.code}</span>
-                      <span className="font-mono text-[9px] text-slate-500">{item.at}</span>
-                    </div>
-                    <div className="mt-0.5 break-words font-mono text-[9px] leading-snug text-slate-300">{item.detail}</div>
+                {movementDiagnostics.length === 0 ? (
+                  <div className="rounded-lg bg-slate-900/80 px-2 py-1.5 font-mono text-[9px] text-slate-400">
+                    sem eventos MOV ainda
                   </div>
-                ))}
+                ) : (
+                  movementDiagnostics.map((item, index) => (
+                    <div key={`${item.at}-${item.code}-${index}`} className="rounded-lg bg-slate-900/80 px-2 py-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[10px] font-black text-amber-300">{item.code}</span>
+                        <span className="font-mono text-[9px] text-slate-500">{item.at}</span>
+                      </div>
+                      <div className="mt-0.5 break-words font-mono text-[9px] leading-snug text-slate-300">{item.detail}</div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           )}
