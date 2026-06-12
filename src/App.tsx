@@ -144,24 +144,8 @@ type NetworkPlayerState = PlayerState & {
   __receivedAt?: number;
 };
 
-const OBSTACLE_SPECS = [
-  { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
-  { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1c1917' },
-  { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#1c1917' },
-  { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#3f4e3c' },
-  { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#7c2d12' },
-  { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#27272a' },
-  { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#27272a' },
-  { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#27272a' },
-  { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#27272a' }
-];
-
-const COLUMN_SPECS = [
-  { x: -18, z: -6 },
-  { x: 18, z: 6 },
-  { x: -6, z: 18 },
-  { x: 6, z: -18 }
-];
+const OBSTACLE_SPECS: { size: [number, number, number]; pos: [number, number, number]; color: string }[] = [];
+const COLUMN_SPECS: { x: number; z: number }[] = [];
 
 const PRACTICE_SPAWN = { x: 0, y: PLAYER_EYE_HEIGHT, z: 14 };
 

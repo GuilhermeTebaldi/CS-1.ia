@@ -20,6 +20,11 @@ interface Player {
   kills: number;
   deaths: number;
   lastInputAt: number;
+  inputMoveX: number;
+  inputMoveZ: number;
+  inputYaw: number;
+  inputPitch: number;
+  inputShooting: boolean;
 }
 
 interface PlayerSnapshot {
@@ -54,6 +59,8 @@ const MAX_PLAYER_Y = 8;
 const SERVER_SYNC_LIMIT = 30.25;
 const PLAYER_RADIUS = 0.45;
 const MOVE_SPEED = 7.5;
+const SERVER_TICK_HZ = 60;
+const SNAPSHOT_HZ = 30;
 const HISTORY_MS = 800;
 const LAG_COMPENSATION_MS = 110;
 const HIT_RADIUS = 0.82;
@@ -75,21 +82,7 @@ const spawnPoints = [
   { x: 8, y: 0, z: -22 }
 ];
 
-const obstacleRects = [
-  { x: 0, z: 0, sx: 6, sz: 6 },
-  { x: -12, z: -12, sx: 2.5, sz: 2.5 },
-  { x: 12, z: 12, sx: 3, sz: 3 },
-  { x: -15, z: 10, sx: 2, sz: 2 },
-  { x: 10, z: -14, sx: 4, sz: 2 },
-  { x: -24, z: -24, sx: 3, sz: 3 },
-  { x: 24, z: -24, sx: 3, sz: 3 },
-  { x: -24, z: 24, sx: 3, sz: 3 },
-  { x: 24, z: 24, sx: 3, sz: 3 },
-  { x: -18, z: -6, sx: 0.95, sz: 0.95 },
-  { x: 18, z: 6, sx: 0.95, sz: 0.95 },
-  { x: -6, z: 18, sx: 0.95, sz: 0.95 },
-  { x: 6, z: -18, sx: 0.95, sz: 0.95 }
-];
+const obstacleRects: { x: number; z: number; sx: number; sz: number }[] = [];
 
 // Express CORS middleware to mirror origins and guarantee browser approval
 app.use((req, res, next) => {
@@ -187,22 +180,30 @@ function isBlockedXZ(x: number, z: number): boolean {
   });
 }
 
-function applyPlayerInput(player: Player, data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }, now = Date.now()) {
+function storePlayerInput(player: Player, data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }, now = Date.now()) {
   if (![data.moveX, data.moveZ, data.yaw, data.pitch].every(Number.isFinite)) {
     return false;
   }
 
-  const dt = Math.max(0, Math.min(0.05, (now - (player.lastInputAt || now)) / 1000));
   player.lastInputAt = now;
-  player.yaw = data.yaw;
-  player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
-  player.isShooting = Boolean(data.isShooting);
+  player.inputMoveX = Math.max(-1, Math.min(1, data.moveX));
+  player.inputMoveZ = Math.max(-1, Math.min(1, data.moveZ));
+  player.inputYaw = data.yaw;
+  player.inputPitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
+  player.inputShooting = Boolean(data.isShooting);
+  return true;
+}
 
-  const inputLen = Math.hypot(data.moveX, data.moveZ);
+function simulatePlayerTick(player: Player, dt: number) {
+  player.yaw = player.inputYaw;
+  player.pitch = player.inputPitch;
+  player.isShooting = player.inputShooting;
+
+  const inputLen = Math.hypot(player.inputMoveX, player.inputMoveZ);
   if (inputLen <= 0.001 || dt <= 0) return true;
 
-  const moveX = data.moveX / Math.max(1, inputLen);
-  const moveZ = data.moveZ / Math.max(1, inputLen);
+  const moveX = player.inputMoveX / Math.max(1, inputLen);
+  const moveZ = player.inputMoveZ / Math.max(1, inputLen);
   const forward = {
     x: -Math.sin(player.yaw),
     z: -Math.cos(player.yaw)
@@ -429,6 +430,11 @@ function setActiveDuel(room: Room, activeIds: string[]) {
       player.z = spawn.z;
       player.yaw = index === 0 ? Math.PI : 0;
       player.pitch = 0;
+      player.inputMoveX = 0;
+      player.inputMoveZ = 0;
+      player.inputYaw = player.yaw;
+      player.inputPitch = 0;
+      player.inputShooting = false;
       player.lastInputAt = Date.now();
       room.history[player.id] = [];
       recordPlayerSnapshot(room, player);
@@ -578,6 +584,42 @@ function removePlayerFromRoom(socket: Socket) {
   }
 }
 
+let lastServerTickAt = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const dt = Math.min(1 / 20, Math.max(0, (now - lastServerTickAt) / 1000));
+  lastServerTickAt = now;
+
+  Object.values(rooms).forEach((room) => {
+    if (room.phase !== 'live') return;
+    room.activePlayerIds.forEach((playerId) => {
+      const player = room.players[playerId];
+      if (!player || !player.isActive || player.health <= 0) return;
+      simulatePlayerTick(player, dt);
+      recordPlayerSnapshot(room, player, now);
+    });
+  });
+}, 1000 / SERVER_TICK_HZ);
+
+setInterval(() => {
+  Object.entries(rooms).forEach(([roomCode, room]) => {
+    if (room.phase !== 'live') return;
+    room.activePlayerIds.forEach((playerId) => {
+      const player = room.players[playerId];
+      if (!player || !player.isActive) return;
+      io.in(roomCode).emit('player:sync', {
+        id: player.id,
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        yaw: player.yaw,
+        pitch: player.pitch,
+        isShooting: player.isShooting
+      });
+    });
+  });
+}, 1000 / SNAPSHOT_HZ);
+
 // Socket.IO real-time multiplayer logic
 io.on('connection', (socket: Socket) => {
   console.log(`🔌 Client connected: ${socket.id}`);
@@ -616,7 +658,12 @@ io.on('connection', (socket: Socket) => {
           color: POLICE_COLOR,
           kills: 0,
           deaths: 0,
-          lastInputAt: Date.now()
+          lastInputAt: Date.now(),
+          inputMoveX: 0,
+          inputMoveZ: 0,
+          inputYaw: 0,
+          inputPitch: 0,
+          inputShooting: false
         }
       }
     };
@@ -668,7 +715,12 @@ io.on('connection', (socket: Socket) => {
       color: joinsActiveRound ? (room.activePlayerIds.length === 0 ? POLICE_COLOR : THIEF_COLOR) : SPECTATOR_COLOR,
       kills: 0,
       deaths: 0,
-      lastInputAt: Date.now()
+      lastInputAt: Date.now(),
+      inputMoveX: 0,
+      inputMoveZ: 0,
+      inputYaw: 0,
+      inputPitch: 0,
+      inputShooting: false
     };
 
     room.players[socket.id] = newPlayer;
@@ -696,18 +748,6 @@ io.on('connection', (socket: Socket) => {
     console.log(`👤 Player ${playerName} joined room ${upperCode}`);
   });
 
-  const broadcastPlayerSnapshot = (roomCode: string, player: Player) => {
-    socket.to(roomCode).emit('player:sync', {
-      id: socket.id,
-      x: player.x,
-      y: player.y,
-      z: player.z,
-      yaw: player.yaw,
-      pitch: player.pitch,
-      isShooting: player.isShooting
-    });
-  };
-
   // CS-style: client sends movement intent, server owns the official position.
   socket.on('player:input', (data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }) => {
     const roomCode = socketToRoom[socket.id];
@@ -718,9 +758,7 @@ io.on('connection', (socket: Socket) => {
     if (!player) return;
     if (!player.isActive || room.phase !== 'live') return;
 
-    if (!applyPlayerInput(player, data)) return;
-    recordPlayerSnapshot(room, player);
-    broadcastPlayerSnapshot(roomCode, player);
+    storePlayerInput(player, data);
   });
 
   // Compatibility while old clients finish deploying.
@@ -735,7 +773,6 @@ io.on('connection', (socket: Socket) => {
 
     if (!sanitizePlayerSync(player, data)) return;
     recordPlayerSnapshot(room, player);
-    broadcastPlayerSnapshot(roomCode, player);
   });
 
   // Handle shooting trigger visual events
@@ -801,6 +838,11 @@ io.on('connection', (socket: Socket) => {
     player.yaw = 0;
     player.pitch = 0;
     player.isShooting = false;
+    player.inputMoveX = 0;
+    player.inputMoveZ = 0;
+    player.inputYaw = 0;
+    player.inputPitch = 0;
+    player.inputShooting = false;
     player.lastInputAt = Date.now();
     room.history[player.id] = [];
     recordPlayerSnapshot(room, player);
