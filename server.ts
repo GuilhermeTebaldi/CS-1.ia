@@ -29,7 +29,7 @@ interface Room {
   players: Record<string, Player>;
 }
 
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
 const httpServer = createServer(app);
 
