@@ -41,6 +41,8 @@ const app = express();
 const ARENA_LIMIT = 29.8;
 const PLAYER_RADIUS = 0.45;
 const MAX_PLAYER_Y = 8;
+const POSITION_CORRECTION_THRESHOLD = 1.25;
+const HEIGHT_CORRECTION_THRESHOLD = 1.0;
 const POLICE_COLOR = '#2563eb';
 const THIEF_COLOR = '#dc2626';
 const SPECTATOR_COLOR = '#94a3b8';
@@ -179,13 +181,13 @@ function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: num
   player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
   player.isShooting = Boolean(data.isShooting);
 
+  const correctionDistance = Math.hypot(player.x - data.x, player.z - data.z);
   return (
-    Math.abs(player.x - data.x) > 0.05 ||
-    Math.abs(player.y - data.y) > 0.05 ||
-    Math.abs(player.z - data.z) > 0.05 ||
-    Math.abs(player.x - beforeX) > Math.abs(data.x - beforeX) + 0.05 ||
-    Math.abs(player.y - beforeY) > Math.abs(data.y - beforeY) + 0.05 ||
-    Math.abs(player.z - beforeZ) > Math.abs(data.z - beforeZ) + 0.05
+    correctionDistance > POSITION_CORRECTION_THRESHOLD ||
+    Math.abs(player.y - data.y) > HEIGHT_CORRECTION_THRESHOLD ||
+    Math.abs(player.x - beforeX) > Math.abs(data.x - beforeX) + POSITION_CORRECTION_THRESHOLD ||
+    Math.abs(player.y - beforeY) > Math.abs(data.y - beforeY) + HEIGHT_CORRECTION_THRESHOLD ||
+    Math.abs(player.z - beforeZ) > Math.abs(data.z - beforeZ) + POSITION_CORRECTION_THRESHOLD
   );
 }
 

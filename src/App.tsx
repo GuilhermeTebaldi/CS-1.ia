@@ -137,6 +137,7 @@ const DEFAULT_SERVER_URL = 'https://cs-1-ia.onrender.com';
 const ARENA_LIMIT = 29.8;
 const PLAYER_RADIUS = 0.45;
 const PLAYER_EYE_HEIGHT = 1.6;
+const SERVER_CORRECTION_SNAP_DISTANCE = 1.25;
 
 const OBSTACLE_SPECS = [
   { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
@@ -394,10 +395,18 @@ export default function App() {
     socket.on('player:correction', (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
       if (currentRoomRef.current === 'TREINO') return;
       if (data.id === socket.id) {
-        stateRef.current.x = data.x;
-        stateRef.current.y = data.y + 1.6;
-        stateRef.current.z = data.z;
-        cameraRef.current?.position.set(data.x, data.y + 1.6, data.z);
+        const correctedY = data.y + PLAYER_EYE_HEIGHT;
+        const camera = cameraRef.current;
+        const distance = camera
+          ? camera.position.distanceTo(new THREE.Vector3(data.x, correctedY, data.z))
+          : SERVER_CORRECTION_SNAP_DISTANCE;
+
+        if (distance >= SERVER_CORRECTION_SNAP_DISTANCE) {
+          stateRef.current.x = data.x;
+          stateRef.current.y = correctedY;
+          stateRef.current.z = data.z;
+          camera?.position.set(data.x, correctedY, data.z);
+        }
       }
       applySyncedPlayer(data);
     });
