@@ -137,7 +137,12 @@ const DEFAULT_SERVER_URL = 'https://cs-1-ia.onrender.com';
 const ARENA_LIMIT = 29.8;
 const PLAYER_RADIUS = 0.45;
 const PLAYER_EYE_HEIGHT = 1.6;
-const REMOTE_SMOOTHING = 0.28;
+const REMOTE_SMOOTHING = 0.55;
+const REMOTE_EXTRAPOLATION_MS = 120;
+
+type NetworkPlayerState = PlayerState & {
+  __receivedAt?: number;
+};
 
 const OBSTACLE_SPECS = [
   { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
@@ -349,22 +354,34 @@ export default function App() {
 
     socket.on('players:sync', (data: { players: Record<string, PlayerState>; match?: MatchState }) => {
       if (currentRoomRef.current === 'TREINO') return;
+      const receivedAt = performance.now();
       const self = socket.id ? data.players[socket.id] : undefined;
-      setJoinedPlayers(prev => {
-        if (!self) return data.players;
+      const mergePlayers = (prev: Record<string, PlayerState>) => {
+        const receivedPlayers = Object.fromEntries(
+          Object.entries(data.players).map(([id, player]) => [
+            id,
+            { ...player, __receivedAt: receivedAt } as NetworkPlayerState
+          ])
+        ) as Record<string, PlayerState>;
+
+        if (!self) return receivedPlayers;
 
         return {
-          ...data.players,
+          ...receivedPlayers,
           [self.id]: {
             ...self,
             x: prev[self.id]?.x ?? self.x,
             y: prev[self.id]?.y ?? self.y,
             z: prev[self.id]?.z ?? self.z,
             yaw: stateRef.current.yaw,
-            pitch: stateRef.current.pitch
+            pitch: stateRef.current.pitch,
+            __receivedAt: receivedAt
           }
         };
-      });
+      };
+      const mergedPlayers = mergePlayers(joinedPlayersRef.current);
+      joinedPlayersRef.current = mergedPlayers;
+      setJoinedPlayers(mergedPlayers);
       if (self) {
         setLocalHealth(self.health);
         stateRef.current.health = self.health;
@@ -389,22 +406,23 @@ export default function App() {
       if (data.id === socket.id) {
         return;
       }
-      setJoinedPlayers(prev => {
-        const player = prev[data.id];
-        if (!player) return prev;
-        return {
-          ...prev,
-          [data.id]: {
-            ...player,
-            x: data.x,
-            y: data.y,
-            z: data.z,
-            yaw: data.yaw,
-            pitch: data.pitch,
-            isShooting: data.isShooting
-          }
-        };
-      });
+      const player = joinedPlayersRef.current[data.id];
+      if (!player) return;
+      const nextPlayers = {
+        ...joinedPlayersRef.current,
+        [data.id]: {
+          ...player,
+          x: data.x,
+          y: data.y,
+          z: data.z,
+          yaw: data.yaw,
+          pitch: data.pitch,
+          isShooting: data.isShooting,
+          __receivedAt: performance.now()
+        } as NetworkPlayerState
+      };
+      joinedPlayersRef.current = nextPlayers;
+      setJoinedPlayers(nextPlayers);
     };
 
     socket.on('player:sync', applySyncedPlayer);
@@ -1203,6 +1221,10 @@ export default function App() {
       lasers: THREE.Line[];
       hitbox: THREE.Mesh; // Invisible simplified direct bbox mesh to cast rays accurately
       targetPosition: THREE.Vector3;
+      velocity: THREE.Vector3;
+      lastSnapshotPosition: THREE.Vector3;
+      lastSnapshotAt: number;
+      lastReceivedAt: number;
       targetYaw: number;
       targetPitch: number;
       lastX: number;
@@ -1332,6 +1354,10 @@ export default function App() {
         lasers: [], 
         hitbox, 
         targetPosition: new THREE.Vector3(p.x, p.y + 0.595, p.z),
+        velocity: new THREE.Vector3(),
+        lastSnapshotPosition: new THREE.Vector3(p.x, p.y + 0.595, p.z),
+        lastSnapshotAt: performance.now(),
+        lastReceivedAt: 0,
         targetYaw: p.yaw,
         targetPitch: p.pitch,
         lastX: p.x, 
@@ -1361,7 +1387,7 @@ export default function App() {
       Object.keys(activePlayers).forEach((id) => {
         if (id === myId) return; // skip self
 
-        const p = activePlayers[id];
+        const p = activePlayers[id] as NetworkPlayerState;
         if (!p.isActive || p.health <= 0) {
           if (remotePlayersMeshes[id]) {
             remotePlayersMeshes[id].group.visible = false;
@@ -1377,7 +1403,21 @@ export default function App() {
 
         const rm = remotePlayersMeshes[id];
         rm.group.visible = true;
-        rm.targetPosition.set(p.x, p.y + 0.595, p.z);
+        const nowMs = performance.now();
+        const snapshotPosition = new THREE.Vector3(p.x, p.y + 0.595, p.z);
+        const receivedAt = p.__receivedAt || nowMs;
+        if (receivedAt !== rm.lastReceivedAt) {
+          const snapshotDt = Math.max(0.016, (receivedAt - rm.lastSnapshotAt) / 1000);
+          const measuredVelocity = snapshotPosition.clone().sub(rm.lastSnapshotPosition).divideScalar(snapshotDt);
+          measuredVelocity.clampLength(0, 9);
+          rm.velocity.lerp(measuredVelocity, 0.65);
+          rm.lastSnapshotPosition.copy(snapshotPosition);
+          rm.lastSnapshotAt = receivedAt;
+          rm.lastReceivedAt = receivedAt;
+        }
+
+        const extrapolationSeconds = Math.min((nowMs - rm.lastSnapshotAt) / 1000, REMOTE_EXTRAPOLATION_MS / 1000);
+        rm.targetPosition.copy(rm.lastSnapshotPosition).addScaledVector(rm.velocity, extrapolationSeconds);
         rm.targetYaw = p.yaw;
         rm.targetPitch = p.pitch;
 
@@ -1841,9 +1881,9 @@ export default function App() {
       stateRef.current.z = camera.position.z;
       stateRef.current.isShooting = keysPressed.has('KeyF'); // auxiliary shooting flag if mouse click fails
 
-      // Synchronize player position with the server 30 times a second (saving container network band)
+      // Synchronize player position every rendered frame for lower perceived latency.
       syncThrottleCounter++;
-      if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 2) {
+      if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 1) {
         syncThrottleCounter = 0;
         socketRef.current?.emit('player:sync', {
           x: stateRef.current.x,
