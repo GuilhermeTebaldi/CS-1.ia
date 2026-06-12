@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import * as THREE from 'three';
-import { PlayerState, KillFeedEntry } from './types';
+import { PlayerState, KillFeedEntry, MatchState } from './types';
 
 let globalMuted = false;
 
@@ -129,6 +129,16 @@ const safeRequestPointerLock = (element: HTMLCanvasElement | null) => {
   }
 };
 
+const defaultMatchState: MatchState = {
+  phase: 'waiting',
+  countdown: null,
+  blueScore: 0,
+  redScore: 0,
+  roundNumber: 0,
+  message: 'Aguardando segundo jogador',
+  activePlayerIds: []
+};
+
 export default function App() {
   // Lobby States
   const [inGame, setInGame] = useState(false);
@@ -139,6 +149,8 @@ export default function App() {
   const [currentRoom, setCurrentRoom] = useState('');
   const [localPlayerId, setLocalPlayerId] = useState('');
   const [joinedPlayers, setJoinedPlayers] = useState<Record<string, PlayerState>>({});
+  const [matchState, setMatchState] = useState<MatchState>(defaultMatchState);
+  const [roundGoVisible, setRoundGoVisible] = useState(false);
   const [joinError, setJoinError] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
 
@@ -189,6 +201,7 @@ export default function App() {
   // References to communicate with Three.js loops
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<Socket | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
 
   // Mutable refs for active local physics
   const stateRef = useRef({
@@ -208,6 +221,18 @@ export default function App() {
   useEffect(() => {
     joinedPlayersRef.current = joinedPlayers;
   }, [joinedPlayers]);
+
+  const matchStateRef = useRef<MatchState>(defaultMatchState);
+  useEffect(() => {
+    matchStateRef.current = matchState;
+  }, [matchState]);
+
+  useEffect(() => {
+    if (matchState.phase !== 'live') return;
+    setRoundGoVisible(true);
+    const timeout = setTimeout(() => setRoundGoVisible(false), 900);
+    return () => clearTimeout(timeout);
+  }, [matchState.phase, matchState.roundNumber]);
 
   const [isDead, setIsDead] = useState(false);
   const [showDeathMenu, setShowDeathMenu] = useState(false);
@@ -259,11 +284,22 @@ export default function App() {
       setJoinError(`Conexão ao servidor falhou em ${cleanedUrl}. Motivo: ${err.message || 'websocket error'}. Verifique se esse backend Socket.IO está online.`);
     });
 
-    socket.on('room:joined', (data: { success: boolean; roomCode: string; playerId: string; players: Record<string, PlayerState>; error?: string }) => {
+    socket.on('room:joined', (data: { success: boolean; roomCode: string; playerId: string; players: Record<string, PlayerState>; match?: MatchState; error?: string }) => {
       if (data.success) {
+        const serverPlayer = data.players[data.playerId];
+        if (serverPlayer) {
+          stateRef.current.x = serverPlayer.x;
+          stateRef.current.y = serverPlayer.y + 1.6;
+          stateRef.current.z = serverPlayer.z;
+          stateRef.current.yaw = serverPlayer.yaw || 0;
+          stateRef.current.pitch = serverPlayer.pitch || 0;
+          stateRef.current.vy = 0;
+          stateRef.current.isGrounded = true;
+        }
         setLocalPlayerId(data.playerId);
         setCurrentRoom(data.roomCode);
         setJoinedPlayers(data.players);
+        setMatchState(data.match || defaultMatchState);
         setLocalHealth(100);
         stateRef.current.health = 100;
         setIsDead(false);
@@ -277,8 +313,25 @@ export default function App() {
       }
     });
 
-    socket.on('players:sync', (data: { players: Record<string, PlayerState> }) => {
+    socket.on('players:sync', (data: { players: Record<string, PlayerState>; match?: MatchState }) => {
       setJoinedPlayers(data.players);
+      const self = socket.id ? data.players[socket.id] : undefined;
+      if (self) {
+        setLocalHealth(self.health);
+        stateRef.current.health = self.health;
+        if (self.health > 0 && self.isActive && data.match?.phase !== 'round_end') {
+          setIsDead(false);
+          isDeadRef.current = false;
+          setShowDeathMenu(false);
+        }
+      }
+      if (data.match) {
+        setMatchState(data.match);
+      }
+    });
+
+    socket.on('match:state', (data: MatchState) => {
+      setMatchState(data);
     });
 
     socket.on('player:health', (data: { id: string; health: number }) => {
@@ -338,10 +391,16 @@ export default function App() {
         setLocalHealth(100);
         stateRef.current.health = 100;
         stateRef.current.x = data.x;
-        stateRef.current.y = data.y + 0.6; // camera height compensation
+        stateRef.current.y = data.y + 1.6; // camera eye-height compensation
         stateRef.current.z = data.z;
+        cameraRef.current?.position.set(data.x, data.y + 1.6, data.z);
+        cameraRef.current?.rotation.set(0, 0, 0);
         stateRef.current.vy = 0;
         stateRef.current.isGrounded = true;
+        setIsDead(false);
+        isDeadRef.current = false;
+        setShowDeathMenu(false);
+        setCountdownVal(null);
       }
 
       setJoinedPlayers(prev => {
@@ -393,7 +452,9 @@ export default function App() {
     setInGame(false);
     setCurrentRoom('');
     setLocalPlayerId('');
-    setJoinedPlayers({});
+      setJoinedPlayers({});
+      setMatchState(defaultMatchState);
+      setRoundGoVisible(false);
     setRoomCodeInput('');
     setPointerLocked(false);
     setIsDead(false);
@@ -451,6 +512,8 @@ export default function App() {
     const selfPlayer: PlayerState = {
       id: soloId,
       name: playerName.trim(),
+      team: 'police',
+      isActive: true,
       health: 100,
       kills: 0,
       deaths: 0,
@@ -466,6 +529,8 @@ export default function App() {
     const dummy1: PlayerState = {
       id: 'dummy1',
       name: 'Recruta_Elite',
+      team: 'thief',
+      isActive: true,
       health: 100,
       kills: 0,
       deaths: 0,
@@ -481,6 +546,8 @@ export default function App() {
     const dummy2: PlayerState = {
       id: 'dummy2',
       name: 'Sargento_Alpha',
+      team: 'thief',
+      isActive: true,
       health: 100,
       kills: 0,
       deaths: 0,
@@ -500,6 +567,12 @@ export default function App() {
     });
 
     setLocalHealth(100);
+    setMatchState({
+      ...defaultMatchState,
+      phase: 'live',
+      message: 'Treino',
+      activePlayerIds: [soloId, dummy1.id, dummy2.id]
+    });
     stateRef.current.health = 100;
     setIsDead(false);
     isDeadRef.current = false;
@@ -637,9 +710,18 @@ export default function App() {
     // Smooth linear fog that keeps the direct view very clear and bright ("nao deixe escuro de mais")
     scene.fog = new THREE.Fog('#1e293b', 22, 85); // Pushed back fog to ensure perfect view under bright warehouse light
 
-    const camera = new THREE.PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+    const getCanvasSize = () => {
+      const parent = canvas.parentElement;
+      const width = canvas.clientWidth || parent?.clientWidth || window.innerWidth || 1;
+      const height = canvas.clientHeight || parent?.clientHeight || window.innerHeight || 1;
+      return { width, height };
+    };
+
+    const initialSize = getCanvasSize();
+    const camera = new THREE.PerspectiveCamera(75, initialSize.width / initialSize.height, 0.1, 1000);
+    cameraRef.current = camera;
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-    renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+    renderer.setSize(initialSize.width, initialSize.height, false);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     
     // Enable realistic shadow mapping
@@ -684,15 +766,19 @@ export default function App() {
     };
 
     // Handle Window Resize via ResizeObserver to support split screens or canvas shifts seamlessly
-    const resizeObserver = new ResizeObserver(() => {
+    const handleCanvasResize = () => {
       requestAnimationFrame(() => {
-        if (!canvas || !canvas.clientWidth || !canvas.clientHeight) return;
-        camera.aspect = canvas.clientWidth / canvas.clientHeight;
+        const { width, height } = getCanvasSize();
+        if (!width || !height) return;
+        camera.aspect = width / height;
         camera.updateProjectionMatrix();
-        renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+        renderer.setSize(width, height, false);
       });
-    });
-    resizeObserver.observe(canvas);
+    };
+
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(handleCanvasResize) : null;
+    resizeObserver?.observe(canvas);
+    window.addEventListener('resize', handleCanvasResize);
 
     // 2. Add Radiant Arena Lighting (Realistic Industrial Daylight)
     // Ambient baseline so shadows are never dark or pitch black
@@ -1164,7 +1250,7 @@ export default function App() {
         if (id === myId) return; // skip self
 
         const p = activePlayers[id];
-        if (p.health <= 0) {
+        if (!p.isActive || p.health <= 0) {
           if (remotePlayersMeshes[id]) {
             remotePlayersMeshes[id].group.visible = false;
             const tagEl = document.getElementById(`remote-tag-${id}`);
@@ -1325,6 +1411,9 @@ export default function App() {
     const handleMouseClick = (e: MouseEvent) => {
       if (document.pointerLockElement !== canvas) return;
       if (stateRef.current.health <= 0) return; // Cant shoot if dead
+      const localPlayerState = joinedPlayersRef.current[localPlayerId];
+      const roundIsLive = currentRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
+      if (!roundIsLive) return;
 
       // Play local sound
       playGunshotSound();
@@ -1473,14 +1562,19 @@ export default function App() {
       const dt = Math.min((now - lastTime) / 1000, 0.1); // caps maximum delta frame to prevent clipping on freeze
       lastTime = now;
 
+      const localPlayerState = joinedPlayersRef.current[localPlayerId];
+      const roundIsLive = currentRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
+
       if (stateRef.current.health > 0) {
         // Player locomotion physics (Keyboard reading WASD status)
         const moveVector = new THREE.Vector3();
         
-        if (keysPressed.has('KeyW') || keysPressed.has('ArrowUp')) moveVector.z -= 1.0;
-        if (keysPressed.has('KeyS') || keysPressed.has('ArrowDown')) moveVector.z += 1.0;
-        if (keysPressed.has('KeyA') || keysPressed.has('ArrowLeft')) moveVector.x -= 1.0;
-        if (keysPressed.has('KeyD') || keysPressed.has('ArrowRight')) moveVector.x += 1.0;
+        if (roundIsLive) {
+          if (keysPressed.has('KeyW') || keysPressed.has('ArrowUp')) moveVector.z -= 1.0;
+          if (keysPressed.has('KeyS') || keysPressed.has('ArrowDown')) moveVector.z += 1.0;
+          if (keysPressed.has('KeyA') || keysPressed.has('ArrowLeft')) moveVector.x -= 1.0;
+          if (keysPressed.has('KeyD') || keysPressed.has('ArrowRight')) moveVector.x += 1.0;
+        }
 
         moveVector.normalize();
 
@@ -1568,7 +1662,7 @@ export default function App() {
           stateRef.current.isGrounded = true;
 
           // Leap Trigger
-          if (keysPressed.has('Space')) {
+          if (roundIsLive && keysPressed.has('Space')) {
             stateRef.current.vy = 8.5; // push vertical force
             stateRef.current.isGrounded = false;
           }
@@ -1655,7 +1749,7 @@ export default function App() {
 
       // Synchronize player position with the server 30 times a second (saving container network band)
       syncThrottleCounter++;
-      if (syncThrottleCounter >= 2) {
+      if (roundIsLive && syncThrottleCounter >= 2) {
         syncThrottleCounter = 0;
         socketRef.current?.emit('player:sync', {
           x: stateRef.current.x,
@@ -1885,8 +1979,10 @@ export default function App() {
     // Clean up Three.js objects of the room on component shift/unmount
     return () => {
       isLoopingRef.current = false;
+      cameraRef.current = null;
       cancelAnimationFrame(animFrameId);
-      resizeObserver.disconnect();
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', handleCanvasResize);
       socketRef.current?.off('player:shoot', handleRemoteVisualShoot);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
@@ -1907,6 +2003,36 @@ export default function App() {
       renderer.dispose();
     };
   }, [inGame]);
+
+  const localPlayerState = joinedPlayers[localPlayerId];
+  const isNetworkRoom = inGame && currentRoom !== 'TREINO';
+  const isRoundLive = !isNetworkRoom || (matchState.phase === 'live' && localPlayerState?.isActive);
+  const roundOverlayText = !isNetworkRoom
+    ? ''
+    : !localPlayerState?.isActive
+      ? 'Aguardando próxima rodada'
+      : matchState.phase === 'waiting'
+        ? 'Aguardando oponente'
+        : matchState.phase === 'countdown'
+          ? String(matchState.countdown ?? 3)
+        : matchState.phase === 'round_end'
+          ? matchState.message
+          : matchState.phase === 'live' && roundGoVisible
+            ? 'GO'
+            : '';
+  const roundOverlaySubtext = !isNetworkRoom
+    ? ''
+    : !localPlayerState?.isActive
+      ? 'Você entra quando o round atual terminar'
+      : matchState.phase === 'waiting'
+        ? 'A partida começa quando outro jogador entrar'
+        : matchState.phase === 'countdown'
+          ? 'Prepare-se'
+          : matchState.phase === 'round_end'
+            ? 'Próximo round em instantes'
+            : matchState.phase === 'live' && roundGoVisible
+              ? 'Round valendo'
+              : '';
 
   return (
     <div id="game-workspace-wrapper" className="min-h-screen bg-slate-900 text-slate-100 font-sans flex flex-col relative select-none">
@@ -2100,7 +2226,7 @@ export default function App() {
           <canvas 
             id="three-game-canvas" 
             ref={canvasRef} 
-            className="w-full flex-1 block outline-none cursor-crosshair h-full" 
+            className="absolute inset-0 w-full h-full block outline-none cursor-crosshair" 
           />
 
           {/* VISUAL DAMAGE BLOOD FLASH INDICATOR */}
@@ -2112,7 +2238,7 @@ export default function App() {
           )}
 
           {/* TACTICAL ESCAPE / PAUSED GAME MENU OVERLAY (WHEN UNLOCKED) */}
-          {!pointerLocked && !isDead && !showDeathMenu && countdownVal === null && (
+          {!pointerLocked && isRoundLive && !isDead && !showDeathMenu && countdownVal === null && (
             <div 
               id="pointer-lock-overlay" 
               className="absolute inset-0 bg-slate-950/85 flex flex-col items-center justify-center p-4 sm:p-6 text-center z-30 transition-all backdrop-blur-sm"
@@ -2233,6 +2359,29 @@ export default function App() {
             </div>
           )}
 
+          {isNetworkRoom && roundOverlayText && countdownVal === null && !showDeathMenu && (
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center z-[45] text-center px-6">
+              <div className="text-[11px] uppercase tracking-[0.35em] text-slate-400 font-black mb-4">
+                Round {Math.max(1, matchState.roundNumber)}
+              </div>
+              <div className={`font-black select-none ${
+                matchState.phase === 'countdown'
+                  ? 'text-8xl font-mono text-amber-300 animate-pulse'
+                  : 'text-3xl sm:text-5xl text-white uppercase tracking-widest'
+              }`}>
+                {roundOverlayText}
+              </div>
+              {roundOverlaySubtext && (
+                <div className="mt-4 text-sm text-slate-400 font-bold">
+                  {roundOverlaySubtext}
+                </div>
+              )}
+              {matchState.phase === 'live' && (
+                <div className="mt-5 text-5xl font-black text-emerald-400 tracking-widest">GO</div>
+              )}
+            </div>
+          )}
+
           {/* HIGH-FIDELITY GAME OVER SCREEN (TRIGGERED UPON DEATH AFTER TRANSITION) */}
           {showDeathMenu && countdownVal === null && (
             <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-4 text-center z-50 animate-fade-in">
@@ -2311,6 +2460,22 @@ export default function App() {
               </button>
             </div>
 
+            {isNetworkRoom && (
+              <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-slate-800/60 pb-2 mb-1.5">
+                <div className="text-left">
+                  <div className="text-[9px] uppercase tracking-widest text-blue-300 font-black">Polícia</div>
+                  <div className="text-2xl font-black font-mono text-blue-400">{matchState.blueScore}</div>
+                </div>
+                <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest">
+                  R{Math.max(1, matchState.roundNumber)}
+                </div>
+                <div className="text-right">
+                  <div className="text-[9px] uppercase tracking-widest text-red-300 font-black">Ladrão</div>
+                  <div className="text-2xl font-black font-mono text-red-400">{matchState.redScore}</div>
+                </div>
+              </div>
+            )}
+
             {/* Readout: Token Code */}
             <div className="flex items-center justify-between text-xs">
               <span className="text-slate-400 font-bold flex items-center gap-1">Token Sala:</span>
@@ -2384,7 +2549,7 @@ export default function App() {
           <div id="floating-names-deck" className="absolute inset-0 pointer-events-none overflow-hidden z-10">
             {Object.values(joinedPlayers).map((p: any) => {
               // Only render tags for other players who are actively alive
-              if (p.id === localPlayerId || p.health <= 0) return null;
+              if (p.id === localPlayerId || !p.isActive || p.health <= 0) return null;
               
               return (
                 <div 
@@ -2396,6 +2561,9 @@ export default function App() {
                     <span className="flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: p.color }} />
                       {p.name}
+                    </span>
+                    <span className="text-[8px] uppercase tracking-widest text-slate-400">
+                      {p.team === 'police' ? 'Polícia' : 'Ladrão'}
                     </span>
                     {/* Small visual hp readout */}
                     <div className="w-16 h-1 bg-slate-800 rounded-full overflow-hidden">
@@ -2427,9 +2595,10 @@ export default function App() {
                     <thead>
                       <tr className="text-slate-400 border-b border-slate-800/80 uppercase font-bold tracking-wider">
                         <th className="pb-2.5 pl-2">Jogador</th>
+                        <th className="pb-2.5 text-center">Time</th>
                         <th className="pb-2.5 text-center">Eliminações</th>
                         <th className="pb-2.5 text-center">Mortes</th>
-                        <th className="pb-2.5 text-right pr-2">Cor Vetor</th>
+                        <th className="pb-2.5 text-right pr-2">Status</th>
                       </tr>
                     </thead>
                     <tbody id="scoreboard-body" className="divide-y divide-slate-800/40">
@@ -2441,10 +2610,15 @@ export default function App() {
                               <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }} />
                               <span className="text-white">{p.name} {p.id === localPlayerId ? '(Você)' : ''}</span>
                             </td>
+                            <td className="py-2.5 text-center font-bold">
+                              <span className={p.team === 'police' ? 'text-blue-400' : p.team === 'thief' ? 'text-red-400' : 'text-slate-500'}>
+                                {p.team === 'police' ? 'Polícia' : p.team === 'thief' ? 'Ladrão' : 'Fila'}
+                              </span>
+                            </td>
                             <td className="py-2.5 text-center text-teal-400 font-mono font-bold">{p.kills}</td>
                             <td className="py-2.5 text-center text-rose-400 font-mono font-medium">{p.deaths}</td>
                             <td className="py-2.5 text-right pr-2">
-                              <span className="text-[10px] font-mono text-slate-500 uppercase">{p.color}</span>
+                              <span className="text-[10px] font-mono text-slate-500 uppercase">{p.isActive ? 'Ativo' : 'Aguardando'}</span>
                             </td>
                           </tr>
                         ))}
