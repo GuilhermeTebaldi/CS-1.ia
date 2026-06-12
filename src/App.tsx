@@ -403,16 +403,21 @@ export default function App() {
     if (!inGame || !canvasRef.current) return;
 
     const canvas = canvasRef.current;
-    
-    // 1. Initialize Three.js WebGL Renderer
+    // 1. Initialize Three.js WebGL Renderer with Shadows and Fog
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#0f172a'); // Rich tech-dark color
-    scene.fog = new THREE.FogExp2('#0f172a', 0.02);
+    scene.background = new THREE.Color('#0b0f19'); // Deep cosmic cyber blue
+    
+    // Smooth linear fog that keeps the direct view very clear and bright ("nao deixe escuro de mais")
+    scene.fog = new THREE.Fog('#0b0f19', 18, 70);
 
     const camera = new THREE.PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    
+    // Enable realistic shadow mapping
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     // Handle Window Resize via ResizeObserver to support split screens or canvas shifts seamlessly
     const resizeObserver = new ResizeObserver(() => {
@@ -423,120 +428,300 @@ export default function App() {
     });
     resizeObserver.observe(canvas);
 
-    // 2. Add Arena Lighting
-    const ambientLight = new THREE.AmbientLight('#1e293b', 1.5);
+    // 2. Add Radiant Arena Lighting (Brighter, beautiful cyber glow)
+    // Ambient baseline so shadows are never dark or pitch black
+    const ambientLight = new THREE.AmbientLight('#ffffff', 0.85);
     scene.add(ambientLight);
 
-    const skyLight = new THREE.DirectionalLight('#38bdf8', 1.8);
-    skyLight.position.set(10, 40, 20);
+    // Hemisphere light representing overhead blue sky dome and warm cyber bounce
+    const hemiLight = new THREE.HemisphereLight('#cbd5e1', '#1e293b', 1.0);
+    hemiLight.position.set(0, 50, 0);
+    scene.add(hemiLight);
+
+    // Main warm golden directional sun light casting high quality shadows
+    const skyLight = new THREE.DirectionalLight('#fef08a', 2.2);
+    skyLight.position.set(20, 50, 15);
+    skyLight.castShadow = true;
+    skyLight.shadow.mapSize.width = 2048;
+    skyLight.shadow.mapSize.height = 2048;
+    skyLight.shadow.camera.near = 0.5;
+    skyLight.shadow.camera.far = 130;
+    
+    // Bounds fitting the 62x62 arena
+    const d = 34;
+    skyLight.shadow.camera.left = -d;
+    skyLight.shadow.camera.right = d;
+    skyLight.shadow.camera.top = d;
+    skyLight.shadow.camera.bottom = -d;
+    skyLight.shadow.bias = -0.0003;
     scene.add(skyLight);
 
-    const floorLight = new THREE.DirectionalLight('#a78bfa', 0.8);
-    floorLight.position.set(-10, 30, -20);
-    scene.add(floorLight);
+    // Neon purple rim fill light from the opposite corner
+    const fillLight = new THREE.DirectionalLight('#c084fc', 1.3);
+    fillLight.position.set(-20, 35, -20);
+    scene.add(fillLight);
 
-    // 3. Build Retro Arena
-    // Floor
+    // 3. Build Retro-Cyber Arena Floor
     const floorGeo = new THREE.PlaneGeometry(62, 62);
     const floorMat = new THREE.MeshStandardMaterial({ 
-      color: '#0f172a', 
-      roughness: 0.8,
-      metalness: 0.1
+      color: '#0e1726', // metallic cyber slate
+      roughness: 0.35,
+      metalness: 0.65
     });
     const floor = new THREE.Mesh(floorGeo, floorMat);
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = 0;
+    floor.receiveShadow = true;
     scene.add(floor);
 
     // Grid Floor Overlay
-    const gridHelper = new THREE.GridHelper(62, 31, '#475569', '#1e293b');
-    gridHelper.position.y = 0.01;
+    const gridHelper = new THREE.GridHelper(62, 31, '#6366f1', '#1e1b4b'); // vibrant indigo grids
+    gridHelper.position.y = 0.005;
     scene.add(gridHelper);
 
+    // Central Glowing Combat Ring Decal
+    const ringGeo = new THREE.RingGeometry(5.8, 6.0, 32);
+    const ringMat = new THREE.MeshBasicMaterial({ color: '#818cf8', side: THREE.DoubleSide });
+    const centerRing = new THREE.Mesh(ringGeo, ringMat);
+    centerRing.rotation.x = -Math.PI / 2;
+    centerRing.position.set(0, 0.01, 0);
+    scene.add(centerRing);
+
+    // Floating corner decorative glowing floor decals
+    const decGroup = new THREE.Group();
+    const decLocs = [-28, 28];
+    decLocs.forEach(dx => {
+      decLocs.forEach(dz => {
+        // Quick corner mesh indicators
+        const mGeo = new THREE.BoxGeometry(1.5, 0.01, 0.15);
+        const mMat = new THREE.MeshBasicMaterial({ color: '#fb7185' });
+        
+        const m1 = new THREE.Mesh(mGeo, mMat);
+        m1.position.set(dx, 0.01, dz);
+        decGroup.add(m1);
+
+        const m2 = new THREE.Mesh(mGeo, mMat);
+        m2.rotation.y = Math.PI / 2;
+        m2.position.set(dx, 0.01, dz);
+        decGroup.add(m2);
+      });
+    });
+    scene.add(decGroup);
+
     // Outer Boundary Walls (Closed Arena)
-    const wallHeight = 4.5;
+    const wallHeight = 4.8;
     const boundaryWallsGroup = new THREE.Group();
     const wallMat = new THREE.MeshStandardMaterial({ 
-      color: '#1e293b', 
-      roughness: 0.9,
-      metalness: 0.3
+      color: '#111827', 
+      roughness: 0.75,
+      metalness: 0.4
     });
 
     // North Wall
-    const sideWallGeoNS = new THREE.BoxGeometry(62, wallHeight, 1);
+    const sideWallGeoNS = new THREE.BoxGeometry(62, wallHeight, 1.2);
     const wallN = new THREE.Mesh(sideWallGeoNS, wallMat);
-    wallN.position.set(0, wallHeight/2, -31);
+    wallN.position.set(0, wallHeight / 2, -31);
+    wallN.receiveShadow = true;
+    wallN.castShadow = true;
     boundaryWallsGroup.add(wallN);
 
     // South Wall
     const wallS = new THREE.Mesh(sideWallGeoNS, wallMat);
-    wallS.position.set(0, wallHeight/2, 31);
+    wallS.position.set(0, wallHeight / 2, 31);
+    wallS.receiveShadow = true;
+    wallS.castShadow = true;
     boundaryWallsGroup.add(wallS);
 
     // East Wall
-    const sideWallGeoEW = new THREE.BoxGeometry(1, wallHeight, 62);
+    const sideWallGeoEW = new THREE.BoxGeometry(1.2, wallHeight, 62);
     const wallE = new THREE.Mesh(sideWallGeoEW, wallMat);
-    wallE.position.set(31, wallHeight/2, 0);
+    wallE.position.set(31, wallHeight / 2, 0);
+    wallE.receiveShadow = true;
+    wallE.castShadow = true;
     boundaryWallsGroup.add(wallE);
 
     // West Wall
     const wallW = new THREE.Mesh(sideWallGeoEW, wallMat);
-    wallW.position.set(-31, wallHeight/2, 0);
+    wallW.position.set(-31, wallHeight / 2, 0);
+    wallW.receiveShadow = true;
+    wallW.castShadow = true;
     boundaryWallsGroup.add(wallW);
 
     scene.add(boundaryWallsGroup);
 
-    // 4. Scatter Tactical Obstacles (Blocky crates for shooting protection)
+    // Laser neon runners along the top of all perimeter walls
+    const topGlowMat = new THREE.MeshBasicMaterial({ color: '#38bdf8' });
+    const wallGlowNGeo = new THREE.BoxGeometry(62, 0.1, 0.1);
+    const wallGlowN = new THREE.Mesh(wallGlowNGeo, topGlowMat);
+    wallGlowN.position.set(0, wallHeight - 0.05, -30.3);
+    scene.add(wallGlowN);
+
+    const wallGlowS = new THREE.Mesh(wallGlowNGeo, topGlowMat);
+    wallGlowS.position.set(0, wallHeight - 0.05, 30.3);
+    scene.add(wallGlowS);
+
+    const wallGlowEGeo = new THREE.BoxGeometry(0.1, 0.1, 62);
+    const wallGlowE = new THREE.Mesh(wallGlowEGeo, topGlowMat);
+    wallGlowE.position.set(30.3, wallHeight - 0.05, 0);
+    scene.add(wallGlowE);
+
+    const wallGlowW = new THREE.Mesh(wallGlowEGeo, topGlowMat);
+    wallGlowW.position.set(-30.3, wallHeight - 0.05, 0);
+    scene.add(wallGlowW);
+
+    // 4. Scatter Tactical Obstacles (Detailed Sci-Fi Crates with corner iron ribs and central energy bands)
     const obstacles: { box: THREE.Box3; mesh: THREE.Mesh }[] = [];
     const obstacleSpecs = [
       // Central Block Structure
-      { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#334155' },
+      { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#312e81' }, // Deep Indigo Base
       
       // Crates scattered
-      { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#475569' },
-      { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#475569' },
-      { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#64748b' },
-      { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#64748b' },
+      { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1e293b' },
+      { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#1e293b' },
+      { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#4338ca' },
+      { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#4338ca' },
       
       // Corners structures
-      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#1e293b' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#1e293b' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#1e293b' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#1e293b' }
+      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#0f172a' },
+      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#0f172a' },
+      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#0f172a' },
+      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#0f172a' }
     ];
 
     obstacleSpecs.forEach((spec) => {
+      const g = new THREE.Group();
+      g.position.set(...spec.pos);
+
+      // Main structural block
       const geo = new THREE.BoxGeometry(...spec.size);
       const mat = new THREE.MeshStandardMaterial({ 
         color: spec.color,
-        roughness: 0.7,
-        metalness: 0.1
+        roughness: 0.35,
+        metalness: 0.65
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.userData = { isObstacle: true };
-      mesh.position.set(...spec.pos);
-      scene.add(mesh);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      g.add(mesh);
 
-      // Create bounding box for simple player-obstacle physics boundary resolution
+      // Detail framing
+      const [sx, sy, sz] = spec.size;
+      const trimMat = new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.25, metalness: 0.85 });
+      
+      // Top plate collar
+      const topPlateGeo = new THREE.BoxGeometry(sx + 0.1, 0.08, sz + 0.1);
+      const topPlate = new THREE.Mesh(topPlateGeo, trimMat);
+      topPlate.position.y = sy / 2;
+      topPlate.castShadow = true;
+      g.add(topPlate);
+
+      // Bottom plate collar
+      const bottomPlateGeo = new THREE.BoxGeometry(sx + 0.1, 0.08, sz + 0.1);
+      const bottomPlate = new THREE.Mesh(bottomPlateGeo, trimMat);
+      bottomPlate.position.y = -sy / 2;
+      bottomPlate.receiveShadow = true;
+      g.add(bottomPlate);
+
+      // Neon energy band tracing the core
+      const energyGeo = new THREE.BoxGeometry(sx + 0.04, 0.12, sz + 0.04);
+      const energyMat = new THREE.MeshBasicMaterial({ 
+        color: spec.color === '#312e81' ? '#38bdf8' : '#fb7185' // glowing blue/pink laser belts
+      });
+      const energy = new THREE.Mesh(energyGeo, energyMat);
+      energy.position.y = 0;
+      g.add(energy);
+
+      scene.add(g);
+
+      // Solid collision bounding box mapping
       const box = new THREE.Box3().setFromObject(mesh);
       obstacles.push({ box, mesh });
     });
 
-    // 5. Create Local Player's Weapon (First Person perspective blocky attachment)
+    // 4b. Add 4 Detailed Neon Columns (Tactful circular covers casting majestic shadows)
+    const columnsSpecs = [
+      { x: -18, z: -6, color: '#06b6d4' }, // Cyan pillar
+      { x: 18, z: 6, color: '#f43f5e' },  // Pink pillar
+      { x: -6, z: 18, color: '#f43f5e' }, // Pink pillar
+      { x: 6, z: -18, color: '#06b6d4' }  // Cyan pillar
+    ];
+
+    columnsSpecs.forEach((col) => {
+      const g = new THREE.Group();
+      g.position.set(col.x, 0, col.z);
+
+      // Heavy Iron Base
+      const baseGeo = new THREE.CylinderGeometry(0.48, 0.55, 0.5, 8);
+      const baseMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.2, metalness: 0.85 });
+      const base = new THREE.Mesh(baseGeo, baseMat);
+      base.position.y = 0.25;
+      base.castShadow = true;
+      base.receiveShadow = true;
+      g.add(base);
+
+      // Glowing Glass Core Light tube
+      const tubeGeo = new THREE.CylinderGeometry(0.2, 0.2, 3.8, 8);
+      const tubeMat = new THREE.MeshBasicMaterial({ color: col.color });
+      const tube = new THREE.Mesh(tubeGeo, tubeMat);
+      tube.position.y = 2.4;
+      g.add(tube);
+
+      // Supporting Iron collar
+      const collarGeo = new THREE.TorusGeometry(0.28, 0.06, 8, 16);
+      const collarMat = new THREE.MeshStandardMaterial({ color: '#334155', metalness: 0.95 });
+      const collar = new THREE.Mesh(collarGeo, collarMat);
+      collar.rotation.x = Math.PI / 2;
+      collar.position.y = 2.4;
+      g.add(collar);
+
+      scene.add(g);
+
+      // Physics solid boundaries mapping for cover
+      const box = new THREE.Box3().setFromCenterAndSize(
+        new THREE.Vector3(col.x, 2.1, col.z),
+        new THREE.Vector3(0.95, 4.2, 0.95)
+      );
+      obstacles.push({ box, mesh: base });
+    });
+
+    // 5. Create Local Player's Weapon (Detailed Rail Rifle with scope visor & silencer)
     const localWeaponGroup = new THREE.Group();
     
-    // Blocky Gun Body
-    const gunBodyGeo = new THREE.BoxGeometry(0.1, 0.08, 0.35);
-    const gunBodyMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.5 });
+    // Slanted Barrel Guard
+    const gunBodyGeo = new THREE.BoxGeometry(0.1, 0.08, 0.38);
+    const gunBodyMat = new THREE.MeshStandardMaterial({ color: '#0f172a', metalness: 0.8, roughness: 0.3 });
     const gunBody = new THREE.Mesh(gunBodyGeo, gunBodyMat);
     gunBody.position.set(0, 0, 0);
     localWeaponGroup.add(gunBody);
 
-    // Neon Barrel Light Strip (Futuristic retro aesthetic)
-    const gunNeonGeo = new THREE.BoxGeometry(0.11, 0.02, 0.15);
-    const gunNeonMat = new THREE.MeshBasicMaterial({ color: '#06b6d4' });
+    // Upper Holographic sight scope
+    const scopeGeo = new THREE.BoxGeometry(0.018, 0.035, 0.12);
+    const scopeMat = new THREE.MeshStandardMaterial({ color: '#1e293b', metalness: 0.6, roughness: 0.4 });
+    const scope = new THREE.Mesh(scopeGeo, scopeMat);
+    scope.position.set(0, 0.055, -0.05);
+    localWeaponGroup.add(scope);
+
+    // Glowing Laser emission lens
+    const lensGeo = new THREE.BoxGeometry(0.012, 0.012, 0.01);
+    const lensMat = new THREE.MeshBasicMaterial({ color: '#06b6d4' }); // cyan laser spot
+    const lens = new THREE.Mesh(lensGeo, lensMat);
+    lens.position.set(0, 0.055, -0.11);
+    localWeaponGroup.add(lens);
+
+    // Extended front Silencer muzzle barrel
+    const muzzleGeo = new THREE.CylinderGeometry(0.018, 0.018, 0.16, 8);
+    const muzzleMat = new THREE.MeshStandardMaterial({ color: '#1e293b', metalness: 0.9, roughness: 0.1 });
+    const muzzle = new THREE.Mesh(muzzleGeo, muzzleMat);
+    muzzle.rotation.x = Math.PI / 2;
+    muzzle.position.set(0, 0, -0.25);
+    localWeaponGroup.add(muzzle);
+
+    // Neon Core Energy strip (Sides of gun body)
+    const gunNeonGeo = new THREE.BoxGeometry(0.112, 0.02, 0.18);
+    const gunNeonMat = new THREE.MeshBasicMaterial({ color: '#f43f5e' }); // hot rose energy core
     const gunNeon = new THREE.Mesh(gunNeonGeo, gunNeonMat);
-    gunNeon.position.set(0, 0.02, -0.05);
+    gunNeon.position.set(0, 0.015, -0.04);
     localWeaponGroup.add(gunNeon);
 
     // Assemble Gun relative offsets
@@ -547,92 +732,150 @@ export default function App() {
     // Initial positioning from state (which is randomized by server on launch)
     camera.position.set(stateRef.current.x, stateRef.current.y, stateRef.current.z);
 
-    // 6. Handle Remote Players 3D Avatar Rendering Maps
+    // 6. Handle Remote Players 3D Avatar Rendering Maps (Stunning sci-fi modules)
     const remotePlayersMeshes: Record<string, {
       group: THREE.Group;
       head: THREE.Mesh;
       body: THREE.Mesh;
+      leftLeg: THREE.Mesh;
+      rightLeg: THREE.Mesh;
+      armL: THREE.Mesh;
+      armR: THREE.Mesh;
       lasers: THREE.Line[];
       hitbox: THREE.Mesh; // Invisible simplified direct bbox mesh to cast rays accurately
+      lastX: number;
+      lastZ: number;
+      walkCycle: number;
     }> = {};
 
     const createRemotePlayerMesh = (p: PlayerState) => {
       const g = new THREE.Group();
       
-      // Avatar Color theme
+      // Avatar Color theme or Team identifiers
       const skinColor = p.color || '#fb923c';
-      const clothesColor = '#3b82f6';
+      const clothesColor = '#1e1b4b'; // Sleek dark jumpsuit base
 
-      // Neck / Head Cube
+      // Head Cube
       const headGeo = new THREE.BoxGeometry(0.48, 0.48, 0.48);
-      const headMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.6 });
+      const headMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.5 });
       const head = new THREE.Mesh(headGeo, headMat);
-      head.position.y = 1.05; // Relative to local player group origin
+      head.position.y = 1.05; // Relative to player origin Y
+      head.castShadow = true;
       g.add(head);
 
-      // Tech Helmet Visor (So direction of remote visual rotation is clear)
-      const visorGeo = new THREE.BoxGeometry(0.52, 0.12, 0.32);
-      const visorMat = new THREE.MeshBasicMaterial({ color: '#f43f5e' }); // glowing neon pink visor
+      // Tech Helmet Visor (Gives direction to remote models clearly)
+      const visorGeo = new THREE.BoxGeometry(0.52, 0.12, 0.3);
+      const visorMat = new THREE.MeshBasicMaterial({ color: skinColor === '#fb7185' ? '#06b6d4' : '#fb7185' }); // alternating high-contrast visor
       const visor = new THREE.Mesh(visorGeo, visorMat);
-      visor.position.set(0, 0.08, -0.15); // positioned front
+      visor.position.set(0, 0.08, -0.16);
       head.add(visor);
 
-      // Torso Block
+      // Torso Jumpsuit Block
       const torsoGeo = new THREE.BoxGeometry(0.66, 0.88, 0.32);
-      const torsoMat = new THREE.MeshStandardMaterial({ color: clothesColor, roughness: 0.8 });
+      const torsoMat = new THREE.MeshStandardMaterial({ color: clothesColor, roughness: 0.6, metalness: 0.5 });
       const torso = new THREE.Mesh(torsoGeo, torsoMat);
       torso.position.y = 0.38;
+      torso.castShadow = true;
+      torso.receiveShadow = true;
       g.add(torso);
+
+      // Detailed Shoulder Plates (Pauldrons)
+      const padGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+      const padMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.3, metalness: 0.7 });
+      
+      const leftPad = new THREE.Mesh(padGeo, padMat);
+      leftPad.position.set(-0.4, 0.4, 0);
+      leftPad.castShadow = true;
+      torso.add(leftPad);
+
+      const rightPad = leftPad.clone();
+      rightPad.position.x = 0.4;
+      torso.add(rightPad);
+
+      // Back Jetpack Fuel Thruster
+      const jetpackGeo = new THREE.BoxGeometry(0.35, 0.55, 0.14);
+      const jetpackMat = new THREE.MeshStandardMaterial({ color: '#334155', metalness: 0.8, roughness: 0.3 });
+      const jetpack = new THREE.Mesh(jetpackGeo, jetpackMat);
+      jetpack.position.set(0, 0.38, 0.21);
+      jetpack.castShadow = true;
+      g.add(jetpack);
+      
+      const nozzleGeo = new THREE.CylinderGeometry(0.06, 0.04, 0.12, 8);
+      const nozzleMat = new THREE.MeshStandardMaterial({ color: '#0f172a', roughness: 0.1, metalness: 0.9 });
+      
+      const nozzleL = new THREE.Mesh(nozzleGeo, nozzleMat);
+      nozzleL.rotation.x = Math.PI / 2;
+      nozzleL.position.set(-0.1, -0.28, 0);
+      jetpack.add(nozzleL);
+
+      const nozzleR = nozzleL.clone();
+      nozzleR.position.x = 0.1;
+      jetpack.add(nozzleR);
 
       // Left Arm
       const leftArmGeo = new THREE.BoxGeometry(0.18, 0.72, 0.18);
-      const armMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.7 });
+      const armMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.6 });
       const leftArm = new THREE.Mesh(leftArmGeo, armMat);
       leftArm.position.set(-0.43, 0.38, 0);
+      leftArm.castShadow = true;
       g.add(leftArm);
 
-      // Right Arm (Forward punching visual) holding Weapon Block
+      // Right Arm (Pointing weapon forward)
       const rightArmGeo = new THREE.BoxGeometry(0.18, 0.72, 0.18);
       const rightArm = new THREE.Mesh(rightArmGeo, armMat);
       rightArm.position.set(0.43, 0.38, -0.15);
-      rightArm.rotation.x = -Math.PI / 3; // pointing arm forward
+      rightArm.rotation.x = -Math.PI / 3; // hand pointed forward
+      rightArm.castShadow = true;
       g.add(rightArm);
 
-      // Block Pistol
+      // Carry Pistol Block
       const repPistolGeo = new THREE.BoxGeometry(0.08, 0.08, 0.24);
-      const repPistolMat = new THREE.MeshStandardMaterial({ color: '#1e293b' });
+      const repPistolMat = new THREE.MeshStandardMaterial({ color: '#0f172a', metalness: 0.9, roughness: 0.1 });
       const repPistol = new THREE.Mesh(repPistolGeo, repPistolMat);
       repPistol.position.set(0, -0.28, -0.15);
       rightArm.add(repPistol);
 
       // Left Leg
-      const legMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.9 });
+      const legMat = new THREE.MeshStandardMaterial({ color: '#0f172a', roughness: 0.8, metalness: 0.3 });
       const leftLegGeo = new THREE.BoxGeometry(0.2, 0.55, 0.2);
       const leftLeg = new THREE.Mesh(leftLegGeo, legMat);
       leftLeg.position.set(-0.2, -0.32, 0);
+      leftLeg.castShadow = true;
       g.add(leftLeg);
 
       // Right Leg
       const rightLegGeo = new THREE.BoxGeometry(0.2, 0.55, 0.2);
       const rightLeg = new THREE.Mesh(rightLegGeo, legMat);
       rightLeg.position.set(0.2, -0.32, 0);
+      rightLeg.castShadow = true;
       g.add(rightLeg);
 
-      // Invisible Capsule hitbox for simplified rapid raycast collision checks mapping
+      // Invisible Capsule hitbox for simplified rapid raycast checks
       const hitboxGeo = new THREE.BoxGeometry(0.85, 2.0, 0.85);
-      const hitboxMat = new THREE.MeshBasicMaterial({ 
-        visible: false // Only active for math boundary calculations
-      });
+      const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
       const hitbox = new THREE.Mesh(hitboxGeo, hitboxMat);
       hitbox.position.y = 0.5;
       hitbox.name = `remote-player-hitbox:${p.id}`; // marker tag to map ray hit
       g.add(hitbox);
 
       scene.add(g);
-      return { group: g, head, body: torso, lasers: [], hitbox };
+      return { 
+        group: g, 
+        head, 
+        body: torso, 
+        leftLeg, 
+        rightLeg, 
+        armL: leftArm, 
+        armR: rightArm, 
+        lasers: [], 
+        hitbox, 
+        lastX: p.x, 
+        lastZ: p.z, 
+        walkCycle: 0 
+      };
     };
 
-    // Keep mesh structure updated in real-time as state elements shift
+    // Keep remote representations perfectly aligned and animated with local frames
     const syncRemotePlayers = () => {
       const activePlayers = joinedPlayersRef.current;
       const myId = socketRef.current?.id || localPlayerId;
@@ -641,6 +884,8 @@ export default function App() {
       Object.keys(remotePlayersMeshes).forEach((id) => {
         if (!activePlayers[id] || id === myId) {
           scene.remove(remotePlayersMeshes[id].group);
+          const tagEl = document.getElementById(`remote-tag-${id}`);
+          if (tagEl) tagEl.style.display = 'none';
           delete remotePlayersMeshes[id];
         }
       });
@@ -651,9 +896,10 @@ export default function App() {
 
         const p = activePlayers[id];
         if (p.health <= 0) {
-          // If dead, temporarily hide group or lower to ground, otherwise render
           if (remotePlayersMeshes[id]) {
             remotePlayersMeshes[id].group.visible = false;
+            const tagEl = document.getElementById(`remote-tag-${id}`);
+            if (tagEl) tagEl.style.display = 'none';
           }
           return;
         }
@@ -665,17 +911,65 @@ export default function App() {
         const rm = remotePlayersMeshes[id];
         rm.group.visible = true;
 
-        // Visual lerp updates or rapid positioning transfers
-        rm.group.position.set(p.x, p.y, p.z);
+        // Position remote models with positive standing offset so their boots rest perfectly flat
+        rm.group.position.set(p.x, p.y + 0.595, p.z);
         rm.group.rotation.y = p.yaw;
         rm.head.rotation.x = p.pitch;
 
-        // Show shooting visuals if active
+        // Active leg walking animations based on position displacements
+        const dx = p.x - rm.lastX;
+        const dz = p.z - rm.lastZ;
+        const movementDist = Math.sqrt(dx * dx + dz * dz);
+        
+        // Use a threshold to detect movement
+        if (movementDist > 0.005) {
+          // Increment cycle based on standard movement intervals
+          rm.walkCycle += movementDist * 8.5;
+          
+          rm.leftLeg.rotation.x = Math.sin(rm.walkCycle) * 0.5;
+          rm.rightLeg.rotation.x = -Math.sin(rm.walkCycle) * 0.5;
+          rm.armL.rotation.x = -Math.sin(rm.walkCycle) * 0.4;
+          rm.armR.rotation.x = -Math.PI / 3 + Math.sin(rm.walkCycle) * 0.25;
+        } else {
+          // Smoothly decay walking rotations back to idle standing postures
+          const decayRate = 0.12;
+          rm.leftLeg.rotation.x += (0 - rm.leftLeg.rotation.x) * decayRate;
+          rm.rightLeg.rotation.x += (0 - rm.rightLeg.rotation.x) * decayRate;
+          rm.armL.rotation.x += (0 - rm.armL.rotation.x) * decayRate;
+          rm.armR.rotation.x += (-Math.PI / 3 - rm.armR.rotation.x) * decayRate;
+        }
+
+        rm.lastX = p.x;
+        rm.lastZ = p.z;
+
+        // Color flash remote torso red when they trigger weapons
         const bodyMat = rm.body.material as THREE.MeshStandardMaterial;
         if (p.isShooting) {
-          bodyMat.color.set('#f43f5e'); // turns deep red on firing
+          bodyMat.color.set('#f43f5e'); // red flash on fire
         } else {
-          bodyMat.color.set('#3b82f6');
+          bodyMat.color.set('#1e1b4b');
+        }
+
+        // Project the 3D player tag coordinates to 2D HTML Name Tags perfectly
+        const tagEl = document.getElementById(`remote-tag-${id}`);
+        if (tagEl) {
+          const projVector = new THREE.Vector3(p.x, p.y + 1.62, p.z); // target right above head level
+          projVector.project(camera);
+          
+          // If behind camera view screen, keep hidden
+          if (projVector.z > 1.0) {
+            tagEl.style.display = 'none';
+          } else {
+            const widthHalf = canvas.clientWidth / 2;
+            const heightHalf = canvas.clientHeight / 2;
+            const screenX = (projVector.x * widthHalf) + widthHalf;
+            const screenY = -(projVector.y * heightHalf) + heightHalf;
+            
+            tagEl.style.display = 'flex';
+            tagEl.className = 'absolute -translate-x-1/2 -translate-y-full flex flex-col items-center';
+            tagEl.style.left = `${screenX}px`;
+            tagEl.style.top = `${screenY}px`;
+          }
         }
       });
     };
@@ -698,7 +992,7 @@ export default function App() {
       );
 
       laserGeo.setFromPoints([gunTipWorldPos, endPos]);
-      const laserMat = new THREE.LineBasicMaterial({ color: '#ef4444', linewidth: 2 });
+      const laserMat = new THREE.LineBasicMaterial({ color: '#f43f5e', linewidth: 2 });
       const laserLine = new THREE.Line(laserGeo, laserMat);
       scene.add(laserLine);
 
@@ -714,7 +1008,7 @@ export default function App() {
 
     // 7. Input state handling variables
     const keysPressed = new Set<string>();
-    
+
     const handleKeyDown = (e: KeyboardEvent) => {
       keysPressed.add(e.code);
 
@@ -962,7 +1256,17 @@ export default function App() {
         camera.rotation.y = stateRef.current.yaw;
         camera.rotation.x = stateRef.current.pitch;
 
-        // Recover muzzle local weapon recoil slide back to original orientation
+        // Clean fluid weapon bobbing and sway based on walk/idle state
+        const isWalking = translationForce.lengthSq() > 0.0001;
+        const bobCycle = isWalking ? now * 0.012 : now * 0.0035; // gentle breath on idle, swift when moving
+        const bobScaleX = isWalking ? 0.012 : 0.003;
+        const bobScaleY = isWalking ? 0.009 : 0.002;
+
+        const targetSwayX = 0.18 + Math.cos(bobCycle) * bobScaleX;
+        const targetSwayY = -0.22 + Math.sin(bobCycle * 2) * bobScaleY;
+
+        localWeaponGroup.position.x = THREE.MathUtils.lerp(localWeaponGroup.position.x, targetSwayX, 10 * dt);
+        localWeaponGroup.position.y = THREE.MathUtils.lerp(localWeaponGroup.position.y, targetSwayY, 10 * dt);
         localWeaponGroup.position.z = THREE.MathUtils.lerp(localWeaponGroup.position.z, -0.38, 12 * dt);
       } else {
         // If local player is dead, pan camera state looking up at sky or lower to ground
@@ -989,6 +1293,43 @@ export default function App() {
           pitch: stateRef.current.pitch,
           isShooting: false
         });
+      }
+
+      // If we are in local TREINO (Practice Mode), make the single target training dummy move/patrol
+      if (currentRoom === 'TREINO') {
+        const dummy = joinedPlayersRef.current['dummy'];
+        if (dummy && dummy.health > 0) {
+          // Patrol pattern using sin/cos of elapsed seconds
+          const elapsedSecs = now * 0.0012;
+          const orbitRadiusX = 8.0;
+          const orbitRadiusZ = 5.0;
+          const centerZ = -10.0;
+          const dx = Math.sin(elapsedSecs) * orbitRadiusX;
+          const dz = centerZ + Math.cos(elapsedSecs * 0.6) * orbitRadiusZ;
+
+          // Compute raw angle to face the walk path
+          const lastX = dummy.x;
+          const lastZ = dummy.z;
+          const nextYaw = Math.atan2(dx - lastX, dz - lastZ);
+
+          // Direct edit on ref to ensure instantaneous frame synchrony
+          dummy.x = dx;
+          dummy.z = dz;
+          dummy.yaw = nextYaw;
+
+          setJoinedPlayers(prev => {
+            if (!prev['dummy']) return prev;
+            return {
+              ...prev,
+              'dummy': {
+                ...prev['dummy'],
+                x: dx,
+                z: dz,
+                yaw: nextYaw
+              }
+            };
+          });
+        }
       }
 
       // Synchronize remote player block representation states
