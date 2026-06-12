@@ -198,7 +198,7 @@ export default function App() {
     socket.on('connect_error', (err) => {
       console.error("🔌 Erro na conexão socket:", err);
       setConnectionStatus('error');
-      setJoinError('Conexão ao servidor falhou. Verifique se o endereço do servidor está correto e ativo.');
+      setJoinError(`Conexão ao servidor falhou em ${cleanedUrl}. Motivo: ${err.message || 'websocket error'}. Verifique se esse backend Socket.IO está online.`);
     });
 
     socket.on('room:joined', (data: { success: boolean; roomCode: string; playerId: string; players: Record<string, PlayerState>; error?: string }) => {
