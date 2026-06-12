@@ -301,6 +301,8 @@ export default function App() {
   const clientMoveSeqRef = useRef(0);
   const lastCorrectionAtRef = useRef(0);
   const movementDiagnosticsRef = useRef<MovementDiagnostic[]>([]);
+  const lastMovementDebugConsoleAtRef = useRef(0);
+  const lastMovementDebugConsoleKeyRef = useRef('');
   const movementDebugStatusRef = useRef<MovementDebugStatus>({
     socketId: '-',
     serverBuild: 'aguardando',
@@ -339,6 +341,17 @@ export default function App() {
       ...patch
     };
     setMovementDebugStatus(movementDebugStatusRef.current);
+
+    const status = movementDebugStatusRef.current;
+    const key = `${status.serverBuild}|${status.lastEvent}|${status.lastSentSeq}|${status.lastRecvSeq}|${status.corrections}`;
+    const now = performance.now();
+    if (key !== lastMovementDebugConsoleKeyRef.current && now - lastMovementDebugConsoleAtRef.current > 500) {
+      lastMovementDebugConsoleKeyRef.current = key;
+      lastMovementDebugConsoleAtRef.current = now;
+      console.info(
+        `[${MOVE_DIAGNOSTIC_VERSION}][MOV-STATUS] socket=${status.socketId.slice(0, 8)} server=${status.serverBuild} send=${status.lastSentSeq} recv=${status.lastRecvSeq} corr=${status.corrections} evt=${status.lastEvent}`
+      );
+    }
   };
 
   // Socket setup (only during connection setups)
@@ -635,6 +648,8 @@ export default function App() {
     setMovementDiagnostics([]);
     movementDiagnosticsRef.current = [];
     clientMoveSeqRef.current = 0;
+    lastMovementDebugConsoleAtRef.current = 0;
+    lastMovementDebugConsoleKeyRef.current = '';
     movementDebugStatusRef.current = {
       socketId: socketRef.current?.id || '-',
       serverBuild: 'aguardando',
