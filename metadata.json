@@ -1,0 +1,6 @@
+{
+  "name": "FPS Multiplayer Arena",
+  "description": "A 3D retro LAN-style FPS multiplayer lobby and blocky arena built with React, Three.js, and Socket.IO.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
