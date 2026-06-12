@@ -134,6 +134,30 @@ const defaultMatchState: MatchState = {
 };
 
 const DEFAULT_SERVER_URL = 'https://cs-1-ia.onrender.com';
+const ARENA_LIMIT = 29.8;
+const PLAYER_RADIUS = 0.45;
+const PLAYER_EYE_HEIGHT = 1.6;
+
+const OBSTACLE_SPECS = [
+  { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
+  { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1c1917' },
+  { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#1c1917' },
+  { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#3f4e3c' },
+  { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#7c2d12' },
+  { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#27272a' },
+  { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#27272a' },
+  { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#27272a' },
+  { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#27272a' }
+];
+
+const COLUMN_SPECS = [
+  { x: -18, z: -6 },
+  { x: 18, z: 6 },
+  { x: -6, z: 18 },
+  { x: 6, z: -18 }
+];
+
+const PRACTICE_SPAWN = { x: 0, y: PLAYER_EYE_HEIGHT, z: 14 };
 
 export default function App() {
   // Lobby States
@@ -219,6 +243,16 @@ export default function App() {
     joinedPlayersRef.current = joinedPlayers;
   }, [joinedPlayers]);
 
+  const currentRoomRef = useRef('');
+  useEffect(() => {
+    currentRoomRef.current = currentRoom;
+  }, [currentRoom]);
+
+  const localPlayerIdRef = useRef('');
+  useEffect(() => {
+    localPlayerIdRef.current = localPlayerId;
+  }, [localPlayerId]);
+
   const matchStateRef = useRef<MatchState>(defaultMatchState);
   useEffect(() => {
     matchStateRef.current = matchState;
@@ -294,7 +328,9 @@ export default function App() {
           stateRef.current.isGrounded = true;
         }
         setLocalPlayerId(data.playerId);
+        localPlayerIdRef.current = data.playerId;
         setCurrentRoom(data.roomCode);
+        currentRoomRef.current = data.roomCode;
         setJoinedPlayers(data.players);
         setMatchState(data.match || defaultMatchState);
         setLocalHealth(100);
@@ -311,6 +347,7 @@ export default function App() {
     });
 
     socket.on('players:sync', (data: { players: Record<string, PlayerState>; match?: MatchState }) => {
+      if (currentRoomRef.current === 'TREINO') return;
       setJoinedPlayers(data.players);
       const self = socket.id ? data.players[socket.id] : undefined;
       if (self) {
@@ -328,25 +365,12 @@ export default function App() {
     });
 
     socket.on('match:state', (data: MatchState) => {
+      if (currentRoomRef.current === 'TREINO') return;
       setMatchState(data);
     });
 
-    socket.on('player:sync', (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
-      if (data.id === socket.id) {
-        stateRef.current.x = data.x;
-        stateRef.current.y = data.y + 1.6;
-        stateRef.current.z = data.z;
-        const camera = cameraRef.current;
-        if (camera) {
-          const dx = Math.abs(camera.position.x - data.x);
-          const dy = Math.abs(camera.position.y - (data.y + 1.6));
-          const dz = Math.abs(camera.position.z - data.z);
-          if (dx > 0.08 || dy > 0.08 || dz > 0.08) {
-            camera.position.set(data.x, data.y + 1.6, data.z);
-          }
-        }
-      }
-
+    const applySyncedPlayer = (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
+      if (currentRoomRef.current === 'TREINO') return;
       setJoinedPlayers(prev => {
         const player = prev[data.id];
         if (!player) return prev;
@@ -363,9 +387,23 @@ export default function App() {
           }
         };
       });
+    };
+
+    socket.on('player:sync', applySyncedPlayer);
+
+    socket.on('player:correction', (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
+      if (currentRoomRef.current === 'TREINO') return;
+      if (data.id === socket.id) {
+        stateRef.current.x = data.x;
+        stateRef.current.y = data.y + 1.6;
+        stateRef.current.z = data.z;
+        cameraRef.current?.position.set(data.x, data.y + 1.6, data.z);
+      }
+      applySyncedPlayer(data);
     });
 
     socket.on('player:health', (data: { id: string; health: number }) => {
+      if (currentRoomRef.current === 'TREINO') return;
       if (data.id === socket.id) {
         setLocalHealth(data.health);
         
@@ -388,6 +426,7 @@ export default function App() {
     });
 
     socket.on('player:eliminated', (data: { victimId: string; victimName: string; attackerId: string; attackerName: string; kills: number }) => {
+      if (currentRoomRef.current === 'TREINO') return;
       // Append kill feed
       const newFeed: KillFeedEntry = {
         id: Math.random().toString(),
@@ -418,6 +457,7 @@ export default function App() {
     });
 
     socket.on('player:respawned', (data: { id: string; x: number; y: number; z: number; health: number }) => {
+      if (currentRoomRef.current === 'TREINO') return;
       if (data.id === socket.id) {
         setLocalHealth(100);
         stateRef.current.health = 100;
@@ -479,19 +519,46 @@ export default function App() {
     }
   };
 
-  const leaveGame = () => {
-    setInGame(false);
-    setCurrentRoom('');
-    setLocalPlayerId('');
-      setJoinedPlayers({});
-      setMatchState(defaultMatchState);
-      setRoundGoVisible(false);
-    setRoomCodeInput('');
+  const resetLocalGameplayState = (spawn = PRACTICE_SPAWN) => {
+    stateRef.current.x = spawn.x;
+    stateRef.current.y = spawn.y;
+    stateRef.current.z = spawn.z;
+    stateRef.current.yaw = 0;
+    stateRef.current.pitch = 0;
+    stateRef.current.vy = 0;
+    stateRef.current.isGrounded = true;
+    stateRef.current.isShooting = false;
+    stateRef.current.health = 100;
+    cameraRef.current?.position.set(spawn.x, spawn.y, spawn.z);
+    cameraRef.current?.rotation.set(0, 0, 0);
+    setLocalHealth(100);
+    setLocalHealthFlashAlert(false);
+    setIsHitmarkerActive(false);
+    setKillFeed([]);
+    setIsScoreboardOpen(false);
     setPointerLocked(false);
     setIsDead(false);
     isDeadRef.current = false;
     setShowDeathMenu(false);
     setCountdownVal(null);
+    setRoundGoVisible(false);
+  };
+
+  const leaveGame = () => {
+    if (currentRoomRef.current && currentRoomRef.current !== 'TREINO') {
+      socketRef.current?.emit('room:leave');
+    }
+    resetLocalGameplayState();
+    setInGame(false);
+    setCurrentRoom('');
+    setLocalPlayerId('');
+    currentRoomRef.current = '';
+    localPlayerIdRef.current = '';
+    setJoinedPlayers({});
+    joinedPlayersRef.current = {};
+    setMatchState(defaultMatchState);
+    matchStateRef.current = defaultMatchState;
+    setRoomCodeInput('');
     document.exitPointerLock?.();
   };
 
@@ -500,14 +567,15 @@ export default function App() {
     stateRef.current.health = 100;
     
     // Spawn player at coordinates
-    stateRef.current.x = (Math.random() * 6) - 3;
-    stateRef.current.z = (Math.random() * 6) + 12;
+    stateRef.current.x = PRACTICE_SPAWN.x;
+    stateRef.current.y = PRACTICE_SPAWN.y;
+    stateRef.current.z = PRACTICE_SPAWN.z;
     stateRef.current.vy = 0;
     stateRef.current.yaw = 0;
     stateRef.current.pitch = 0;
     
     // Revive bots in training
-    if (currentRoom === 'TREINO') {
+    if (currentRoomRef.current === 'TREINO') {
       setJoinedPlayers(prev => {
         const copy = { ...prev };
         if (copy['dummy1']) {
@@ -525,7 +593,7 @@ export default function App() {
         return copy;
       });
     } else {
-      if (socketRef.current) {
+      if (socketRef.current && currentRoomRef.current) {
         socketRef.current.emit('player:respawn');
       }
     }
@@ -536,9 +604,15 @@ export default function App() {
       setJoinError('Por favor, digite um nome válido primeiro.');
       return;
     }
+    if (currentRoomRef.current && currentRoomRef.current !== 'TREINO') {
+      socketRef.current?.emit('room:leave');
+    }
     const soloId = 'solo';
+    resetLocalGameplayState(PRACTICE_SPAWN);
     setLocalPlayerId(soloId);
+    localPlayerIdRef.current = soloId;
     setCurrentRoom('TREINO');
+    currentRoomRef.current = 'TREINO';
     
     const selfPlayer: PlayerState = {
       id: soloId,
@@ -549,9 +623,9 @@ export default function App() {
       kills: 0,
       deaths: 0,
       color: '#1e3a8a', // Dark tactical navy blue
-      x: 0,
+      x: PRACTICE_SPAWN.x,
       y: 0,
-      z: 0,
+      z: PRACTICE_SPAWN.z,
       yaw: 0,
       pitch: 0,
       isShooting: false
@@ -597,22 +671,12 @@ export default function App() {
       [dummy2.id]: dummy2
     });
 
-    setLocalHealth(100);
     setMatchState({
       ...defaultMatchState,
       phase: 'live',
       message: 'Treino',
       activePlayerIds: [soloId, dummy1.id, dummy2.id]
     });
-    stateRef.current.health = 100;
-    setIsDead(false);
-    isDeadRef.current = false;
-    setShowDeathMenu(false);
-    setCountdownVal(null);
-    
-    // Spawn player at coordinates
-    stateRef.current.x = (Math.random() * 6) - 3;
-    stateRef.current.z = (Math.random() * 6) + 12; // spawn player slightly backwards
 
     setInGame(true);
     setJoinError('');
@@ -760,10 +824,11 @@ export default function App() {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     handleRespawnRef.current = () => {
-      const rx = (Math.random() * 6) - 3;
-      const rz = (Math.random() * 6) + 12;
-      camera.position.set(rx, 1.6, rz);
+      camera.position.set(PRACTICE_SPAWN.x, PRACTICE_SPAWN.y, PRACTICE_SPAWN.z);
       camera.rotation.set(0, 0, 0);
+      stateRef.current.x = PRACTICE_SPAWN.x;
+      stateRef.current.y = PRACTICE_SPAWN.y;
+      stateRef.current.z = PRACTICE_SPAWN.z;
       stateRef.current.vy = 0;
       stateRef.current.yaw = 0;
       stateRef.current.pitch = 0;
@@ -773,7 +838,7 @@ export default function App() {
       isDeadRef.current = false;
       setShowDeathMenu(false);
 
-      if (currentRoom === 'TREINO') {
+      if (currentRoomRef.current === 'TREINO') {
         setJoinedPlayers(prev => {
           const copy = { ...prev };
           if (copy['dummy1']) {
@@ -789,7 +854,7 @@ export default function App() {
           return copy;
         });
       } else {
-        if (socketRef.current) {
+        if (socketRef.current && currentRoomRef.current) {
           socketRef.current.emit('player:respawn');
         }
       }
@@ -954,24 +1019,23 @@ export default function App() {
 
     // 4. Scatter Tactical Obstacles (Realistic Cargo Crates and Concrete Barriers)
     const obstacles: { box: THREE.Box3; mesh: THREE.Mesh }[] = [];
-    const obstacleSpecs = [
-      // Central Block Structure
-      { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' }, // Olive Drab Base
-      
-      // Crates scattered
-      { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1c1917' }, // Dark wood / carbon
-      { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#1c1917' },
-      { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#3f4e3c' },
-      { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#7c2d12' }, // Rust orange crate
-      
-      // Corners structures
-      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#27272a' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#27272a' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#27272a' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#27272a' }
-    ];
 
-    obstacleSpecs.forEach((spec) => {
+    [
+      { mesh: wallN, size: [62, wallHeight, 1.2] as [number, number, number], pos: [0, wallHeight / 2, -31] as [number, number, number] },
+      { mesh: wallS, size: [62, wallHeight, 1.2] as [number, number, number], pos: [0, wallHeight / 2, 31] as [number, number, number] },
+      { mesh: wallE, size: [1.2, wallHeight, 62] as [number, number, number], pos: [31, wallHeight / 2, 0] as [number, number, number] },
+      { mesh: wallW, size: [1.2, wallHeight, 62] as [number, number, number], pos: [-31, wallHeight / 2, 0] as [number, number, number] }
+    ].forEach((wall) => {
+      obstacles.push({
+        box: new THREE.Box3().setFromCenterAndSize(
+          new THREE.Vector3(...wall.pos),
+          new THREE.Vector3(...wall.size)
+        ),
+        mesh: wall.mesh
+      });
+    });
+
+    OBSTACLE_SPECS.forEach((spec) => {
       const g = new THREE.Group();
       g.position.set(...spec.pos);
 
@@ -1019,19 +1083,15 @@ export default function App() {
       scene.add(g);
 
       // Solid collision bounding box mapping
-      const box = new THREE.Box3().setFromObject(mesh);
+      const box = new THREE.Box3().setFromCenterAndSize(
+        new THREE.Vector3(spec.pos[0], spec.pos[1], spec.pos[2]),
+        new THREE.Vector3(sx, sy, sz)
+      );
       obstacles.push({ box, mesh });
     });
 
     // 4b. Add 4 Concrete Support Columns with steel collars (Tactical realism)
-    const columnsSpecs = [
-      { x: -18, z: -6 },
-      { x: 18, z: 6 },
-      { x: -6, z: 18 },
-      { x: 6, z: -18 }
-    ];
-
-    columnsSpecs.forEach((col) => {
+    COLUMN_SPECS.forEach((col) => {
       const g = new THREE.Group();
       g.position.set(col.x, 0, col.z);
 
@@ -1064,11 +1124,17 @@ export default function App() {
       scene.add(g);
 
       // Physics solid boundaries mapping for cover
+      const blockerGeo = new THREE.BoxGeometry(0.95, 4.2, 0.95);
+      const blockerMat = new THREE.MeshBasicMaterial({ visible: false });
+      const blocker = new THREE.Mesh(blockerGeo, blockerMat);
+      blocker.position.set(col.x, 2.1, col.z);
+      scene.add(blocker);
+
       const box = new THREE.Box3().setFromCenterAndSize(
         new THREE.Vector3(col.x, 2.1, col.z),
         new THREE.Vector3(0.95, 4.2, 0.95)
       );
-      obstacles.push({ box, mesh: base });
+      obstacles.push({ box, mesh: blocker });
     });
 
     // 5. Create Local Player's Weapon (Detailed Tactical Assault Rifle with precision sight & muzzle)
@@ -1264,7 +1330,9 @@ export default function App() {
     // Keep remote representations perfectly aligned and animated with local frames
     const syncRemotePlayers = () => {
       const activePlayers = joinedPlayersRef.current;
-      const myId = socketRef.current?.id || localPlayerId;
+      const myId = currentRoomRef.current === 'TREINO'
+        ? localPlayerIdRef.current
+        : socketRef.current?.id || localPlayerIdRef.current;
 
       // Check for removed players
       Object.keys(remotePlayersMeshes).forEach((id) => {
@@ -1442,15 +1510,18 @@ export default function App() {
     const handleMouseClick = (e: MouseEvent) => {
       if (document.pointerLockElement !== canvas) return;
       if (stateRef.current.health <= 0) return; // Cant shoot if dead
-      const localPlayerState = joinedPlayersRef.current[localPlayerId];
-      const roundIsLive = currentRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
+      const activeRoom = currentRoomRef.current;
+      const localPlayerState = joinedPlayersRef.current[localPlayerIdRef.current];
+      const roundIsLive = activeRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
       if (!roundIsLive) return;
 
       // Play local sound
       playGunshotSound();
 
       // Trigger server visual flash
-      socketRef.current?.emit('player:shoot');
+      if (activeRoom !== 'TREINO' && socketRef.current?.connected) {
+        socketRef.current.emit('player:shoot');
+      }
 
       // Local recoil weapon motion feedback
       localWeaponGroup.position.z += 0.12; // kickback recoil displacement
@@ -1505,7 +1576,7 @@ export default function App() {
         if (hitObj.name && hitObj.name.startsWith('remote-player-hitbox:')) {
           const matchedVictimId = hitObj.name.split(':')[1];
           
-          if (socketRef.current && socketRef.current.connected) {
+          if (activeRoom !== 'TREINO' && socketRef.current && socketRef.current.connected) {
             // Register Hit on Target via server!
             socketRef.current?.emit('player:hit', {
               victimId: matchedVictimId,
@@ -1587,14 +1658,29 @@ export default function App() {
     let lastTime = performance.now();
     let syncThrottleCounter = 0;
 
+    const playerBoxAt = (x: number, y: number, z: number) => new THREE.Box3(
+      new THREE.Vector3(x - PLAYER_RADIUS, y - PLAYER_EYE_HEIGHT, z - PLAYER_RADIUS),
+      new THREE.Vector3(x + PLAYER_RADIUS, y + 0.4, z + PLAYER_RADIUS)
+    );
+
+    const canStandAt = (x: number, y: number, z: number) => {
+      if (x < -ARENA_LIMIT || x > ARENA_LIMIT || z < -ARENA_LIMIT || z > ARENA_LIMIT) {
+        return false;
+      }
+      const box = playerBoxAt(x, y, z);
+      return !obstacles.some((item) => box.intersectsBox(item.box));
+    };
+
     const gameLoop = () => {
       if (!isLoopingRef.current) return;
       const now = performance.now();
       const dt = Math.min((now - lastTime) / 1000, 0.1); // caps maximum delta frame to prevent clipping on freeze
       lastTime = now;
 
-      const localPlayerState = joinedPlayersRef.current[localPlayerId];
-      const roundIsLive = currentRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
+      const activeRoom = currentRoomRef.current;
+      const activeLocalPlayerId = localPlayerIdRef.current;
+      const localPlayerState = joinedPlayersRef.current[activeLocalPlayerId];
+      const roundIsLive = activeRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
 
       if (stateRef.current.health > 0) {
         // Player locomotion physics (Keyboard reading WASD status)
@@ -1623,62 +1709,20 @@ export default function App() {
         const speed = 7.5;
         const finalDisplacement = translationForce.multiplyScalar(speed * dt);
 
-        // Boundary Clamp inside Arena (floor is 62x62 boundary walls at 31)
-        const arenaLimit = 29.8;
-        const playerRadius = 0.45;
-
-        // Axis-separated movement and collision resolution for perfect wall sliding & clipping prevention
-        // 1. Move and resolve on X axis
-        let currentX = camera.position.x;
-        let originalX = currentX;
-        let targetX = currentX + finalDisplacement.x;
-        let clampedX = Math.max(-arenaLimit, Math.min(arenaLimit, targetX));
-
-        let futureBoxX = new THREE.Box3(
-          new THREE.Vector3(clampedX - playerRadius, camera.position.y - 1.6, camera.position.z - playerRadius),
-          new THREE.Vector3(clampedX + playerRadius, camera.position.y + 0.4, camera.position.z + playerRadius)
-        );
-
-        for (let i = 0; i < obstacles.length; i++) {
-          const { box } = obstacles[i];
-          if (futureBoxX.intersectsBox(box)) {
-            const overlapX = Math.min(futureBoxX.max.x - box.min.x, box.max.x - futureBoxX.min.x);
-            if (originalX < box.min.x) {
-              clampedX -= (overlapX + 0.01);
-            } else {
-              clampedX += (overlapX + 0.01);
-            }
-            futureBoxX.min.x = clampedX - playerRadius;
-            futureBoxX.max.x = clampedX + playerRadius;
-          }
+        if (!canStandAt(camera.position.x, camera.position.y, camera.position.z)) {
+          camera.position.set(PRACTICE_SPAWN.x, PRACTICE_SPAWN.y, PRACTICE_SPAWN.z);
         }
-        camera.position.x = clampedX;
 
-        // 2. Move and resolve on Z axis
-        let currentZ = camera.position.z;
-        let originalZ = currentZ;
-        let targetZ = currentZ + finalDisplacement.z;
-        let clampedZ = Math.max(-arenaLimit, Math.min(arenaLimit, targetZ));
-
-        let futureBoxZ = new THREE.Box3(
-          new THREE.Vector3(camera.position.x - playerRadius, camera.position.y - 1.6, clampedZ - playerRadius),
-          new THREE.Vector3(camera.position.x + playerRadius, camera.position.y + 0.4, clampedZ + playerRadius)
-        );
-
-        for (let i = 0; i < obstacles.length; i++) {
-          const { box } = obstacles[i];
-          if (futureBoxZ.intersectsBox(box)) {
-            const overlapZ = Math.min(futureBoxZ.max.z - box.min.z, box.max.z - futureBoxZ.min.z);
-            if (originalZ < box.min.z) {
-              clampedZ -= (overlapZ + 0.01);
-            } else {
-              clampedZ += (overlapZ + 0.01);
-            }
-            futureBoxZ.min.z = clampedZ - playerRadius;
-            futureBoxZ.max.z = clampedZ + playerRadius;
-          }
+        // Axis-separated movement: keep the old coordinate on blocked axes and still allow wall sliding.
+        const nextX = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, camera.position.x + finalDisplacement.x));
+        if (canStandAt(nextX, camera.position.y, camera.position.z)) {
+          camera.position.x = nextX;
         }
-        camera.position.z = clampedZ;
+
+        const nextZ = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, camera.position.z + finalDisplacement.z));
+        if (canStandAt(camera.position.x, camera.position.y, nextZ)) {
+          camera.position.z = nextZ;
+        }
 
         // Leaping Jumping Mechanics and downward gravity
         const gravity = -26.0;
@@ -1780,7 +1824,7 @@ export default function App() {
 
       // Synchronize player position with the server 30 times a second (saving container network band)
       syncThrottleCounter++;
-      if (roundIsLive && syncThrottleCounter >= 2) {
+      if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 2) {
         syncThrottleCounter = 0;
         socketRef.current?.emit('player:sync', {
           x: stateRef.current.x,
@@ -1794,7 +1838,7 @@ export default function App() {
       }
 
       // If we are in local TREINO (Practice Mode), execute advanced hostile intelligence for Recruta_Elite and Sargento_Alpha
-      if (currentRoom === 'TREINO') {
+      if (activeRoom === 'TREINO') {
         const botIds = ['dummy1', 'dummy2'];
         
         botIds.forEach(bId => {

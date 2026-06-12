@@ -155,11 +155,14 @@ function getSpawnPoint(room?: Room): { x: number; y: number; z: number } {
   return { ...point };
 }
 
-function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) {
+function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }): boolean {
   if (![data.x, data.y, data.z, data.yaw, data.pitch].every(Number.isFinite)) {
-    return;
+    return false;
   }
 
+  const beforeX = player.x;
+  const beforeY = player.y;
+  const beforeZ = player.z;
   const nextX = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, data.x));
   const nextZ = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, data.z));
 
@@ -175,6 +178,15 @@ function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: num
   player.yaw = data.yaw;
   player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
   player.isShooting = Boolean(data.isShooting);
+
+  return (
+    Math.abs(player.x - data.x) > 0.05 ||
+    Math.abs(player.y - data.y) > 0.05 ||
+    Math.abs(player.z - data.z) > 0.05 ||
+    Math.abs(player.x - beforeX) > Math.abs(data.x - beforeX) + 0.05 ||
+    Math.abs(player.y - beforeY) > Math.abs(data.y - beforeY) + 0.05 ||
+    Math.abs(player.z - beforeZ) > Math.abs(data.z - beforeZ) + 0.05
+  );
 }
 
 function getMatchState(room: Room) {
@@ -337,12 +349,43 @@ function endRound(roomCode: string, winner: Player, loser: Player) {
   }, 3000);
 }
 
+function removePlayerFromRoom(socket: Socket) {
+  const roomCode = socketToRoom[socket.id];
+  if (!roomCode || !rooms[roomCode]) return;
+
+  const room = rooms[roomCode];
+  const player = room.players[socket.id];
+  const pName = player ? player.name : 'Unknown';
+
+  delete room.players[socket.id];
+  delete socketToRoom[socket.id];
+  room.activePlayerIds = room.activePlayerIds.filter((id) => id !== socket.id);
+  socket.leave(roomCode);
+
+  socket.to(roomCode).emit('player:disconnected', {
+    id: socket.id,
+    name: pName
+  });
+
+  if (Object.keys(room.players).length === 0) {
+    clearRoomTimers(room);
+    delete rooms[roomCode];
+    console.log(`🏠 Room ${roomCode} is now empty and has been removed.`);
+  } else if (room.activePlayerIds.length < 2) {
+    waitOrStart(roomCode);
+  } else {
+    emitRoomState(roomCode);
+  }
+}
+
 // Socket.IO real-time multiplayer logic
 io.on('connection', (socket: Socket) => {
   console.log(`🔌 Client connected: ${socket.id}`);
 
   // Create Room
   socket.on('room:create', ({ name }: { name: string }) => {
+    removePlayerFromRoom(socket);
+
     const code = generateRoomCode();
     const playerName = (name && name.trim()) ? name.substring(0, 12) : `Player_${socket.id.substring(0, 4)}`;
     const spawn = getSpawnPoint();
@@ -393,6 +436,8 @@ io.on('connection', (socket: Socket) => {
   // Join Room
   socket.on('room:join', ({ name, code }: { name: string; code: string }) => {
     const upperCode = code ? code.toUpperCase().trim() : '';
+    removePlayerFromRoom(socket);
+
     const room = rooms[upperCode];
 
     if (!room) {
@@ -455,10 +500,9 @@ io.on('connection', (socket: Socket) => {
     if (!player) return;
     if (!player.isActive || rooms[roomCode].phase !== 'live') return;
 
-    sanitizePlayerSync(player, data);
+    const corrected = sanitizePlayerSync(player, data);
 
-    // Broadcast the server-authoritative position to everyone, including the sender.
-    io.in(roomCode).emit('player:sync', {
+    const payload = {
       id: socket.id,
       x: player.x,
       y: player.y,
@@ -466,7 +510,12 @@ io.on('connection', (socket: Socket) => {
       yaw: player.yaw,
       pitch: player.pitch,
       isShooting: player.isShooting
-    });
+    };
+
+    socket.to(roomCode).emit('player:sync', payload);
+    if (corrected) {
+      socket.emit('player:correction', payload);
+    }
   });
 
   // Handle shooting trigger visual events
@@ -548,38 +597,14 @@ io.on('connection', (socket: Socket) => {
     });
   });
 
+  socket.on('room:leave', () => {
+    removePlayerFromRoom(socket);
+  });
+
   // Disconnections
   socket.on('disconnect', () => {
     console.log(`🔌 Client disconnected: ${socket.id}`);
-    const roomCode = socketToRoom[socket.id];
-
-    if (roomCode && rooms[roomCode]) {
-      const room = rooms[roomCode];
-      const player = room.players[socket.id];
-      const pName = player ? player.name : 'Unknown';
-
-      // Delete player
-      delete room.players[socket.id];
-      delete socketToRoom[socket.id];
-      room.activePlayerIds = room.activePlayerIds.filter((id) => id !== socket.id);
-
-      // Notify others
-      socket.to(roomCode).emit('player:disconnected', {
-        id: socket.id,
-        name: pName
-      });
-
-      // If room is empty, clear it out of server memory
-      if (Object.keys(room.players).length === 0) {
-        clearRoomTimers(room);
-        delete rooms[roomCode];
-        console.log(`🏠 Room ${roomCode} is now empty and has been removed.`);
-      } else if (room.activePlayerIds.length < 2) {
-        waitOrStart(roomCode);
-      } else {
-        emitRoomState(roomCode);
-      }
-    }
+    removePlayerFromRoom(socket);
   });
 });
 
