@@ -14,7 +14,8 @@ import {
   Award,
   CircleDot,
   Volume2,
-  Sword
+  Sword,
+  Target
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import * as THREE from 'three';
@@ -336,6 +337,61 @@ export default function App() {
     document.exitPointerLock?.();
   };
 
+  const startPracticeMode = () => {
+    if (!playerName.trim()) {
+      setJoinError('Por favor, digite um nome válido primeiro.');
+      return;
+    }
+    const soloId = 'solo';
+    setLocalPlayerId(soloId);
+    setCurrentRoom('TREINO');
+    
+    const selfPlayer: PlayerState = {
+      id: soloId,
+      name: playerName.trim(),
+      health: 100,
+      kills: 0,
+      deaths: 0,
+      color: '#3b82f6',
+      x: 0,
+      y: 0,
+      z: 0,
+      yaw: 0,
+      pitch: 0,
+      isShooting: false
+    };
+
+    const dummyPlayer: PlayerState = {
+      id: 'dummy',
+      name: 'Alvo_Treino',
+      health: 100,
+      kills: 0,
+      deaths: 0,
+      color: '#fb7185',
+      x: (Math.random() * 10) - 5,
+      y: 0,
+      z: -((Math.random() * 8) + 4),
+      yaw: 0,
+      pitch: 0,
+      isShooting: false
+    };
+
+    setJoinedPlayers({
+      [soloId]: selfPlayer,
+      [dummyPlayer.id]: dummyPlayer
+    });
+
+    setLocalHealth(100);
+    stateRef.current.health = 100;
+    
+    // Spawn player at coordinates
+    stateRef.current.x = (Math.random() * 8) - 4;
+    stateRef.current.z = (Math.random() * 8) - 4;
+
+    setInGame(true);
+    setJoinError('');
+  };
+
   const copyRoomCode = () => {
     navigator.clipboard.writeText(currentRoom);
     setCopiedCode(true);
@@ -579,7 +635,7 @@ export default function App() {
     // Keep mesh structure updated in real-time as state elements shift
     const syncRemotePlayers = () => {
       const activePlayers = joinedPlayersRef.current;
-      const myId = socketRef.current?.id;
+      const myId = socketRef.current?.id || localPlayerId;
 
       // Check for removed players
       Object.keys(remotePlayersMeshes).forEach((id) => {
@@ -743,11 +799,65 @@ export default function App() {
         if (hitObj.name && hitObj.name.startsWith('remote-player-hitbox:')) {
           const matchedVictimId = hitObj.name.split(':')[1];
           
-          // Register Hit on Target via server!
-          socketRef.current?.emit('player:hit', {
-            victimId: matchedVictimId,
-            damage: 25 // 4 hits to defeat
-          });
+          if (socketRef.current && socketRef.current.connected) {
+            // Register Hit on Target via server!
+            socketRef.current?.emit('player:hit', {
+              victimId: matchedVictimId,
+              damage: 25 // 4 hits to defeat
+            });
+          } else {
+            // Local sandbox mode damage simulation
+            setJoinedPlayers(prev => {
+              if (!prev[matchedVictimId]) return prev;
+              const victim = { ...prev[matchedVictimId] };
+              victim.health = Math.max(0, victim.health - 25);
+              
+              if (victim.health <= 0) {
+                // Spawn kill feed message
+                const newFeed: KillFeedEntry = {
+                  id: Math.random().toString(),
+                  attacker: playerName,
+                  victim: victim.name,
+                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                };
+                setKillFeed(feed => [newFeed, ...feed].slice(0, 5));
+                playEliminationSound();
+                setTimeout(() => {
+                  setKillFeed(feed => feed.filter(f => f.id !== newFeed.id));
+                }, 4500);
+
+                // Update score
+                setTimeout(() => {
+                  setJoinedPlayers(next => {
+                    const copy = { ...next };
+                    if (copy['solo']) copy['solo'].kills += 1;
+                    return copy;
+                  });
+                }, 10);
+
+                // Respawn target dummy in 1 second
+                setTimeout(() => {
+                  setJoinedPlayers(next => {
+                    if (!next[matchedVictimId]) return next;
+                    return {
+                      ...next,
+                      [matchedVictimId]: {
+                        ...next[matchedVictimId],
+                        health: 100,
+                        x: (Math.random() * 20) - 10,
+                        z: -((Math.random() * 15) + 5)
+                      }
+                    };
+                  });
+                }, 1000);
+              }
+
+              return {
+                ...prev,
+                [matchedVictimId]: victim
+              };
+            });
+          }
 
           // Play audio and show hitmarker visual
           playHitSound();
@@ -1033,7 +1143,7 @@ export default function App() {
               <div id="lobby-mini-spacer" className="text-center text-slate-500 text-xs py-0.5 font-bold">OU entrar por código</div>
 
               {/* BOX: JOIN ROOM */}
-              <div id="join-form-wrapper" className="flex gap-2">
+              <div id="join-form-wrapper" className="flex gap-2 animate-fade-in">
                 <div className="relative flex-1">
                   <Hash className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-500" />
                   <input
@@ -1052,6 +1162,18 @@ export default function App() {
                   className="bg-slate-700 hover:bg-slate-600 border border-slate-600 hover:border-slate-500 text-white font-bold text-sm px-6 rounded-xl transition-all active:scale-95 flex items-center justify-center"
                 >
                   Entrar
+                </button>
+              </div>
+
+              {/* OFFLINE SANDBOX BACKUP - Perfect for Vercel/External environments */}
+              <div id="lobby-solo-divider" className="border-t border-slate-700/40 pt-1.5 mt-2">
+                <button
+                  id="btn-practice-offline"
+                  type="button"
+                  onClick={startPracticeMode}
+                  className="w-full bg-slate-900/65 hover:bg-slate-900/90 text-slate-300 hover:text-white border border-slate-700/60 hover:border-slate-500/80 px-5 py-3 rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Target className="w-4 h-4 text-rose-500 animate-pulse" /> Jogar Offline (Modo Prática / Alvo)
                 </button>
               </div>
             </div>
