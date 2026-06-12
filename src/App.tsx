@@ -137,24 +137,7 @@ const DEFAULT_SERVER_URL = 'https://cs-1-ia.onrender.com';
 const ARENA_LIMIT = 29.8;
 const PLAYER_RADIUS = 0.45;
 const PLAYER_EYE_HEIGHT = 1.6;
-const SERVER_CORRECTION_SNAP_DISTANCE = 1.25;
 const REMOTE_SMOOTHING = 0.28;
-const MOVE_DIAGNOSTIC_VERSION = 'move-diagnostics-v1';
-
-type MovementDiagnostic = {
-  code: string;
-  detail: string;
-  at: string;
-};
-
-type MovementDebugStatus = {
-  socketId: string;
-  serverBuild: string;
-  lastEvent: string;
-  lastSentSeq: number;
-  lastRecvSeq: string;
-  corrections: number;
-};
 
 const OBSTACLE_SPECS = [
   { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' },
@@ -207,15 +190,6 @@ export default function App() {
   const [killFeed, setKillFeed] = useState<KillFeedEntry[]>([]);
   const [isScoreboardOpen, setIsScoreboardOpen] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
-  const [movementDiagnostics, setMovementDiagnostics] = useState<MovementDiagnostic[]>([]);
-  const [movementDebugStatus, setMovementDebugStatus] = useState<MovementDebugStatus>({
-    socketId: '-',
-    serverBuild: 'aguardando',
-    lastEvent: 'boot',
-    lastSentSeq: 0,
-    lastRecvSeq: '-',
-    corrections: 0
-  });
 
   const [mouseSensitivity, setMouseSensitivity] = useState(2.2);
   const [soundMutedState, setSoundMutedState] = useState(false);
@@ -298,19 +272,6 @@ export default function App() {
   const isDeadRef = useRef(false);
   const isLoopingRef = useRef(false);
   const handleRespawnRef = useRef<() => void>();
-  const clientMoveSeqRef = useRef(0);
-  const lastCorrectionAtRef = useRef(0);
-  const movementDiagnosticsRef = useRef<MovementDiagnostic[]>([]);
-  const lastMovementDebugConsoleAtRef = useRef(0);
-  const lastMovementDebugConsoleKeyRef = useRef('');
-  const movementDebugStatusRef = useRef<MovementDebugStatus>({
-    socketId: '-',
-    serverBuild: 'aguardando',
-    lastEvent: 'boot',
-    lastSentSeq: 0,
-    lastRecvSeq: '-',
-    corrections: 0
-  });
 
   // Update client-side local health representation
   useEffect(() => {
@@ -322,36 +283,6 @@ export default function App() {
     const lim = val.slice(0, 15);
     setPlayerName(lim);
     localStorage.setItem('blocky_fps_player_name', lim);
-  };
-
-  const recordMovementDiagnostic = (code: string, detail: string) => {
-    const entry = {
-      code,
-      detail,
-      at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    };
-    console.warn(`[${MOVE_DIAGNOSTIC_VERSION}][${code}] ${detail}`);
-    movementDiagnosticsRef.current = [entry, ...movementDiagnosticsRef.current].slice(0, 5);
-    setMovementDiagnostics(movementDiagnosticsRef.current);
-  };
-
-  const updateMovementDebugStatus = (patch: Partial<MovementDebugStatus>) => {
-    movementDebugStatusRef.current = {
-      ...movementDebugStatusRef.current,
-      ...patch
-    };
-    setMovementDebugStatus(movementDebugStatusRef.current);
-
-    const status = movementDebugStatusRef.current;
-    const key = `${status.serverBuild}|${status.lastEvent}|${status.lastSentSeq}|${status.lastRecvSeq}|${status.corrections}`;
-    const now = performance.now();
-    if (key !== lastMovementDebugConsoleKeyRef.current && now - lastMovementDebugConsoleAtRef.current > 500) {
-      lastMovementDebugConsoleKeyRef.current = key;
-      lastMovementDebugConsoleAtRef.current = now;
-      console.info(
-        `[${MOVE_DIAGNOSTIC_VERSION}][MOV-STATUS] socket=${status.socketId.slice(0, 8)} server=${status.serverBuild} send=${status.lastSentSeq} recv=${status.lastRecvSeq} corr=${status.corrections} evt=${status.lastEvent}`
-      );
-    }
   };
 
   // Socket setup (only during connection setups)
@@ -370,14 +301,12 @@ export default function App() {
 
     socket.on('connect', () => {
       console.log("🔌 Conectado ao socket com ID:", socket.id);
-      updateMovementDebugStatus({ socketId: socket.id || '-', lastEvent: 'socket:connect' });
       setConnectionStatus('connected');
       setJoinError('');
     });
 
     socket.on('disconnect', () => {
       console.log("🔌 Desconectado do socket.");
-      updateMovementDebugStatus({ socketId: '-', lastEvent: 'socket:disconnect' });
       setConnectionStatus('disconnected');
     });
 
@@ -403,13 +332,6 @@ export default function App() {
         localPlayerIdRef.current = data.playerId;
         setCurrentRoom(data.roomCode);
         currentRoomRef.current = data.roomCode;
-        updateMovementDebugStatus({
-          socketId: socket.id || data.playerId,
-          serverBuild: 'aguardando',
-          lastEvent: 'room:joined',
-          lastRecvSeq: '-',
-          corrections: 0
-        });
         setJoinedPlayers(data.players);
         setMatchState(data.match || defaultMatchState);
         setLocalHealth(100);
@@ -427,8 +349,22 @@ export default function App() {
 
     socket.on('players:sync', (data: { players: Record<string, PlayerState>; match?: MatchState }) => {
       if (currentRoomRef.current === 'TREINO') return;
-      setJoinedPlayers(data.players);
       const self = socket.id ? data.players[socket.id] : undefined;
+      setJoinedPlayers(prev => {
+        if (!self) return data.players;
+
+        return {
+          ...data.players,
+          [self.id]: {
+            ...self,
+            x: prev[self.id]?.x ?? self.x,
+            y: prev[self.id]?.y ?? self.y,
+            z: prev[self.id]?.z ?? self.z,
+            yaw: stateRef.current.yaw,
+            pitch: stateRef.current.pitch
+          }
+        };
+      });
       if (self) {
         setLocalHealth(self.health);
         stateRef.current.health = self.health;
@@ -448,15 +384,10 @@ export default function App() {
       setMatchState(data);
     });
 
-    const applySyncedPlayer = (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean; clientSeq?: number; serverBuild?: string }) => {
+    const applySyncedPlayer = (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
       if (currentRoomRef.current === 'TREINO') return;
-      updateMovementDebugStatus({
-        serverBuild: data.serverBuild || 'legacy',
-        lastEvent: data.id === socket.id ? 'player:sync:self' : 'player:sync:remote',
-        lastRecvSeq: data.clientSeq !== undefined ? String(data.clientSeq) : 'legacy'
-      });
       if (data.id === socket.id) {
-        recordMovementDiagnostic('MOV-REMOTE-SELF', `player:sync voltou para o proprio jogador. seq=${data.clientSeq ?? 'legacy'} server=${data.serverBuild || 'legacy'}`);
+        return;
       }
       setJoinedPlayers(prev => {
         const player = prev[data.id];
@@ -477,40 +408,6 @@ export default function App() {
     };
 
     socket.on('player:sync', applySyncedPlayer);
-
-    socket.on('player:correction', (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean; clientSeq?: number; correctionReason?: string; serverBuild?: string }) => {
-      if (currentRoomRef.current === 'TREINO') return;
-      if (data.id === socket.id) {
-        const correctedY = data.y + PLAYER_EYE_HEIGHT;
-        const camera = cameraRef.current;
-        const distance = camera
-          ? camera.position.distanceTo(new THREE.Vector3(data.x, correctedY, data.z))
-          : SERVER_CORRECTION_SNAP_DISTANCE;
-        const now = performance.now();
-        const sinceLast = lastCorrectionAtRef.current ? Math.round(now - lastCorrectionAtRef.current) : 0;
-        lastCorrectionAtRef.current = now;
-        updateMovementDebugStatus({
-          serverBuild: data.serverBuild || 'legacy',
-          lastEvent: 'player:correction',
-          lastRecvSeq: data.clientSeq !== undefined ? String(data.clientSeq) : 'legacy',
-          corrections: movementDebugStatusRef.current.corrections + 1
-        });
-
-        recordMovementDiagnostic(
-          distance >= SERVER_CORRECTION_SNAP_DISTANCE ? 'MOV-CORR-SNAP-BLOCKED' : 'MOV-CORR-SMALL-BLOCKED',
-          `Servidor tentou corrigir ${distance.toFixed(2)}u. seq=${data.clientSeq ?? 'legacy'} reason=${data.correctionReason || 'legacy'} server=${data.serverBuild || 'legacy'} dt=${sinceLast}ms`
-        );
-
-        if (distance > 12 || Math.abs(correctedY) > 20) {
-          stateRef.current.x = data.x;
-          stateRef.current.y = correctedY;
-          stateRef.current.z = data.z;
-          camera?.position.set(data.x, correctedY, data.z);
-          recordMovementDiagnostic('MOV-CORR-EMERGENCY', `Snap emergencial aplicado por distancia ${distance.toFixed(2)}u`);
-        }
-      }
-      applySyncedPlayer(data);
-    });
 
     socket.on('player:health', (data: { id: string; health: number }) => {
       if (currentRoomRef.current === 'TREINO') return;
@@ -645,20 +542,6 @@ export default function App() {
     setLocalHealthFlashAlert(false);
     setIsHitmarkerActive(false);
     setKillFeed([]);
-    setMovementDiagnostics([]);
-    movementDiagnosticsRef.current = [];
-    clientMoveSeqRef.current = 0;
-    lastMovementDebugConsoleAtRef.current = 0;
-    lastMovementDebugConsoleKeyRef.current = '';
-    movementDebugStatusRef.current = {
-      socketId: socketRef.current?.id || '-',
-      serverBuild: 'aguardando',
-      lastEvent: 'reset',
-      lastSentSeq: 0,
-      lastRecvSeq: '-',
-      corrections: 0
-    };
-    setMovementDebugStatus(movementDebugStatusRef.current);
     setIsScoreboardOpen(false);
     setPointerLocked(false);
     setIsDead(false);
@@ -1962,18 +1845,7 @@ export default function App() {
       syncThrottleCounter++;
       if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 2) {
         syncThrottleCounter = 0;
-        clientMoveSeqRef.current += 1;
-        if (clientMoveSeqRef.current % 10 === 0) {
-          updateMovementDebugStatus({
-            lastEvent: 'player:sync:send',
-            lastSentSeq: clientMoveSeqRef.current,
-            socketId: socketRef.current.id || movementDebugStatusRef.current.socketId
-          });
-        }
         socketRef.current?.emit('player:sync', {
-          clientSeq: clientMoveSeqRef.current,
-          clientRoom: activeRoom,
-          clientBuild: MOVE_DIAGNOSTIC_VERSION,
           x: stateRef.current.x,
           // Subtract height offset so player models appear standing nicely flat on top of the grid helper
           y: stateRef.current.y - 1.6, 
@@ -2713,40 +2585,6 @@ export default function App() {
               </span>
             </div>
           </div>
-
-          {isNetworkRoom && (
-            <div id="movement-diagnostics-panel" className="absolute top-40 right-6 z-40 max-w-sm rounded-xl border border-amber-500/40 bg-slate-950/90 p-3 text-left shadow-xl">
-              <div className="mb-2 flex items-center justify-between gap-3 border-b border-amber-500/20 pb-2">
-                <span className="text-[10px] font-black uppercase tracking-widest text-amber-300">Movimento debug</span>
-                <span className="font-mono text-[9px] text-slate-500">{MOVE_DIAGNOSTIC_VERSION}</span>
-              </div>
-              <div className="mb-2 grid grid-cols-2 gap-1.5 font-mono text-[9px] text-slate-300">
-                <div className="rounded bg-slate-900/80 px-2 py-1">socket: {movementDebugStatus.socketId.slice(0, 8)}</div>
-                <div className="rounded bg-slate-900/80 px-2 py-1">server: {movementDebugStatus.serverBuild}</div>
-                <div className="rounded bg-slate-900/80 px-2 py-1">send: {movementDebugStatus.lastSentSeq}</div>
-                <div className="rounded bg-slate-900/80 px-2 py-1">recv: {movementDebugStatus.lastRecvSeq}</div>
-                <div className="rounded bg-slate-900/80 px-2 py-1">corr: {movementDebugStatus.corrections}</div>
-                <div className="rounded bg-slate-900/80 px-2 py-1">evt: {movementDebugStatus.lastEvent}</div>
-              </div>
-              <div className="space-y-1.5">
-                {movementDiagnostics.length === 0 ? (
-                  <div className="rounded-lg bg-slate-900/80 px-2 py-1.5 font-mono text-[9px] text-slate-400">
-                    sem eventos MOV ainda
-                  </div>
-                ) : (
-                  movementDiagnostics.map((item, index) => (
-                    <div key={`${item.at}-${item.code}-${index}`} className="rounded-lg bg-slate-900/80 px-2 py-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono text-[10px] font-black text-amber-300">{item.code}</span>
-                        <span className="font-mono text-[9px] text-slate-500">{item.at}</span>
-                      </div>
-                      <div className="mt-0.5 break-words font-mono text-[9px] leading-snug text-slate-300">{item.detail}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
 
           {/* DYNAMIC RETRO SPECTATOR KILL FEED */}
           <div id="hud-kill-feed" className="absolute top-6 left-6 max-w-sm pointer-events-none space-y-1.5">

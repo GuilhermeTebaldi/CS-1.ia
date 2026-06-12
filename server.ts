@@ -41,7 +41,6 @@ const app = express();
 const ARENA_LIMIT = 29.8;
 const MAX_PLAYER_Y = 8;
 const SERVER_SYNC_LIMIT = 30.25;
-const SERVER_MOVE_DIAGNOSTIC_VERSION = 'server-move-diagnostics-v1';
 const POLICE_COLOR = '#2563eb';
 const THIEF_COLOR = '#dc2626';
 const SPECTATOR_COLOR = '#94a3b8';
@@ -128,9 +127,9 @@ function getSpawnPoint(room?: Room): { x: number; y: number; z: number } {
   return { ...point };
 }
 
-function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }): string | null {
+function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }): boolean {
   if (![data.x, data.y, data.z, data.yaw, data.pitch].every(Number.isFinite)) {
-    return 'non-finite';
+    return false;
   }
 
   player.x = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, data.x));
@@ -140,9 +139,7 @@ function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: num
   player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
   player.isShooting = Boolean(data.isShooting);
 
-  return Math.abs(player.x - data.x) > 0.001 || Math.abs(player.y - data.y) > 0.001 || Math.abs(player.z - data.z) > 0.001
-    ? 'server-bounds-clamp'
-    : null;
+  return true;
 }
 
 function getMatchState(room: Room) {
@@ -448,7 +445,7 @@ io.on('connection', (socket: Socket) => {
   });
 
   // Handle position/rotation synchronizations
-  socket.on('player:sync', (data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean; clientSeq?: number; clientRoom?: string; clientBuild?: string }) => {
+  socket.on('player:sync', (data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
     const roomCode = socketToRoom[socket.id];
     if (!roomCode || !rooms[roomCode]) return;
 
@@ -456,28 +453,12 @@ io.on('connection', (socket: Socket) => {
     if (!player) return;
     if (!player.isActive || rooms[roomCode].phase !== 'live') return;
 
-    const correctionReason = sanitizePlayerSync(player, data);
+    if (!sanitizePlayerSync(player, data)) return;
 
-    const payload = {
-      id: socket.id,
-      clientSeq: data.clientSeq,
-      clientRoom: data.clientRoom,
-      clientBuild: data.clientBuild,
-      serverBuild: SERVER_MOVE_DIAGNOSTIC_VERSION,
-      correctionReason,
-      x: player.x,
-      y: player.y,
-      z: player.z,
-      yaw: player.yaw,
-      pitch: player.pitch,
-      isShooting: player.isShooting
-    };
-
-    socket.to(roomCode).emit('player:sync', payload);
-    if (correctionReason) {
-      console.warn(`[${SERVER_MOVE_DIAGNOSTIC_VERSION}][MOV-SERVER-CORRECTION] room=${roomCode} player=${socket.id} seq=${data.clientSeq ?? 'legacy'} reason=${correctionReason} client=${data.clientBuild || 'legacy'}`);
-      socket.emit('player:correction', payload);
-    }
+    io.in(roomCode).emit('players:sync', {
+      players: rooms[roomCode].players,
+      match: getMatchState(rooms[roomCode])
+    });
   });
 
   // Handle shooting trigger visual events
