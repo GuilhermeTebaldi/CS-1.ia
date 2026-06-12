@@ -14,6 +14,9 @@ import {
   Award,
   CircleDot,
   Volume2,
+  VolumeX,
+  Sliders,
+  RefreshCw,
   Sword,
   Target
 } from 'lucide-react';
@@ -21,8 +24,11 @@ import { io, Socket } from 'socket.io-client';
 import * as THREE from 'three';
 import { PlayerState, KillFeedEntry } from './types';
 
+let globalMuted = false;
+
 // Procedural audio generation using standard Web Audio API (extremely robust & visual feedback)
 const playGunshotSound = () => {
+  if (globalMuted) return;
   try {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     
@@ -61,6 +67,7 @@ const playGunshotSound = () => {
 };
 
 const playHitSound = () => {
+  if (globalMuted) return;
   try {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     
@@ -83,6 +90,7 @@ const playHitSound = () => {
 };
 
 const playEliminationSound = () => {
+  if (globalMuted) return;
   try {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     
@@ -105,6 +113,20 @@ const playEliminationSound = () => {
       osc.stop(audioCtx.currentTime + idx * 0.08 + 0.3);
     });
   } catch (err) {}
+};
+
+const safeRequestPointerLock = (element: HTMLCanvasElement | null) => {
+  if (!element) return;
+  try {
+    const promise = element.requestPointerLock() as any;
+    if (promise && typeof promise.catch === 'function') {
+      promise.catch((err: any) => {
+        console.warn("Pointer lock request handled safely (preventing uncaught exception):", err);
+      });
+    }
+  } catch (err) {
+    console.warn("Pointer lock call caught synchronous exception:", err);
+  }
 };
 
 export default function App() {
@@ -134,6 +156,35 @@ export default function App() {
   const [killFeed, setKillFeed] = useState<KillFeedEntry[]>([]);
   const [isScoreboardOpen, setIsScoreboardOpen] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
+
+  const [mouseSensitivity, setMouseSensitivity] = useState(2.2);
+  const [soundMutedState, setSoundMutedState] = useState(false);
+  const [botDifficulty, setBotDifficulty] = useState<'easy' | 'medium' | 'hardcore'>('medium');
+  const [selectedSkin, setSelectedSkin] = useState<'classic' | 'gold' | 'arctic' | 'rust'>('classic');
+
+  const sensitivityRef = useRef(0.0022);
+  const botDifficultyRef = useRef<'easy' | 'medium' | 'hardcore'>('medium');
+  const selectedSkinRef = useRef<'classic' | 'gold' | 'arctic' | 'rust'>('classic');
+
+  // Sync mouse sensitivity state to ref
+  useEffect(() => {
+    sensitivityRef.current = mouseSensitivity * 0.001;
+  }, [mouseSensitivity]);
+
+  // Sync bot difficulty state to ref
+  useEffect(() => {
+    botDifficultyRef.current = botDifficulty;
+  }, [botDifficulty]);
+
+  // Sync weapons skin state to ref
+  useEffect(() => {
+    selectedSkinRef.current = selectedSkin;
+  }, [selectedSkin]);
+
+  // Sync mute state to globalMuted
+  useEffect(() => {
+    globalMuted = soundMutedState;
+  }, [soundMutedState]);
 
   // References to communicate with Three.js loops
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -178,9 +229,9 @@ export default function App() {
     console.log("🔌 Conectando ao servidor Socket.IO:", cleanedUrl);
     
     const socket = io(cleanedUrl, {
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      timeout: 10000
+      transports: ['polling', 'websocket'],
+      reconnectionAttempts: 8,
+      timeout: 15000
     });
     socketRef.current = socket;
 
@@ -337,6 +388,42 @@ export default function App() {
     document.exitPointerLock?.();
   };
 
+  const handleRespawnReset = () => {
+    setLocalHealth(100);
+    stateRef.current.health = 100;
+    
+    // Spawn player at coordinates
+    stateRef.current.x = (Math.random() * 6) - 3;
+    stateRef.current.z = (Math.random() * 6) + 12;
+    stateRef.current.vy = 0;
+    stateRef.current.yaw = 0;
+    stateRef.current.pitch = 0;
+    
+    // Revive bots in training
+    if (currentRoom === 'TREINO') {
+      setJoinedPlayers(prev => {
+        const copy = { ...prev };
+        if (copy['dummy1']) {
+          copy['dummy1'].health = 100;
+          copy['dummy1'].x = -12;
+          copy['dummy1'].z = -18;
+          copy['dummy1'].yaw = 0;
+        }
+        if (copy['dummy2']) {
+          copy['dummy2'].health = 100;
+          copy['dummy2'].x = 12;
+          copy['dummy2'].z = -24;
+          copy['dummy2'].yaw = 0;
+        }
+        return copy;
+      });
+    } else {
+      if (socketRef.current) {
+        socketRef.current.emit('player:respawn');
+      }
+    }
+  };
+
   const startPracticeMode = () => {
     if (!playerName.trim()) {
       setJoinError('Por favor, digite um nome válido primeiro.');
@@ -352,7 +439,7 @@ export default function App() {
       health: 100,
       kills: 0,
       deaths: 0,
-      color: '#3b82f6',
+      color: '#1e3a8a', // Dark tactical navy blue
       x: 0,
       y: 0,
       z: 0,
@@ -361,16 +448,31 @@ export default function App() {
       isShooting: false
     };
 
-    const dummyPlayer: PlayerState = {
-      id: 'dummy',
-      name: 'Alvo_Treino',
+    const dummy1: PlayerState = {
+      id: 'dummy1',
+      name: 'Recruta_Elite',
       health: 100,
       kills: 0,
       deaths: 0,
-      color: '#fb7185',
-      x: (Math.random() * 10) - 5,
+      color: '#047857', // Forest/Military green
+      x: -12,
       y: 0,
-      z: -((Math.random() * 8) + 4),
+      z: -18,
+      yaw: 0,
+      pitch: 0,
+      isShooting: false
+    };
+
+    const dummy2: PlayerState = {
+      id: 'dummy2',
+      name: 'Sargento_Alpha',
+      health: 100,
+      kills: 0,
+      deaths: 0,
+      color: '#b45309', // Deep copper brown
+      x: 12,
+      y: 0,
+      z: -24,
       yaw: 0,
       pitch: 0,
       isShooting: false
@@ -378,15 +480,16 @@ export default function App() {
 
     setJoinedPlayers({
       [soloId]: selfPlayer,
-      [dummyPlayer.id]: dummyPlayer
+      [dummy1.id]: dummy1,
+      [dummy2.id]: dummy2
     });
 
     setLocalHealth(100);
     stateRef.current.health = 100;
     
     // Spawn player at coordinates
-    stateRef.current.x = (Math.random() * 8) - 4;
-    stateRef.current.z = (Math.random() * 8) - 4;
+    stateRef.current.x = (Math.random() * 6) - 3;
+    stateRef.current.z = (Math.random() * 6) + 12; // spawn player slightly backwards
 
     setInGame(true);
     setJoinError('');
@@ -403,12 +506,80 @@ export default function App() {
     if (!inGame || !canvasRef.current) return;
 
     const canvas = canvasRef.current;
+    
+    // Smoke particles and bullet decals list containers
+    const smokeParticles: { mesh: THREE.Mesh; maxLife: number; life: number; vel: THREE.Vector3 }[] = [];
+    const bulletDecals: { mesh: THREE.Mesh; life: number }[] = [];
+
+    // Persistent tracking states for offline combat bots
+    const botAIStates: Record<string, { targetX: number; targetZ: number; changeTimer: number; shootCooldown: number }> = {
+      dummy1: { targetX: -12, targetZ: -18, changeTimer: 0, shootCooldown: 0.8 },
+      dummy2: { targetX: 12, targetZ: -24, changeTimer: 0, shootCooldown: 1.6 }
+    };
+
+    const spawnSmoke = (position: THREE.Vector3, count: number = 6) => {
+      for (let i = 0; i < count; i++) {
+        const smokeSize = Math.random() * 0.08 + 0.03;
+        const smokeGeo = new THREE.SphereGeometry(smokeSize, 5, 5);
+        const smokeMat = new THREE.MeshBasicMaterial({
+          color: '#cbd5e1', // Slate grey gunpowder combustion smoke
+          transparent: true,
+          opacity: 0.45,
+          depthWrite: false
+        });
+        const mesh = new THREE.Mesh(smokeGeo, smokeMat);
+        mesh.position.copy(position).add(new THREE.Vector3(
+          (Math.random() - 0.5) * 0.08,
+          (Math.random() - 0.5) * 0.08,
+          (Math.random() - 0.5) * 0.08
+        ));
+        scene.add(mesh);
+        
+        smokeParticles.push({
+          mesh,
+          maxLife: 35 + Math.floor(Math.random() * 15),
+          life: 35 + Math.floor(Math.random() * 15),
+          vel: new THREE.Vector3(
+            (Math.random() - 0.5) * 0.4,
+            Math.random() * 0.6 + 0.15, // slight thermal draft
+            (Math.random() - 0.5) * 0.4
+          )
+        });
+      }
+    };
+
+    const spawnBulletDecal = (hitPoint: THREE.Vector3, worldNormal: THREE.Vector3) => {
+      const decalGeo = new THREE.CircleGeometry(0.065, 8);
+      const decalMat = new THREE.MeshBasicMaterial({
+        color: '#1c1917', // soot dark charcoal
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4
+      });
+      const decal = new THREE.Mesh(decalGeo, decalMat);
+      decal.position.copy(hitPoint).addScaledVector(worldNormal, 0.002);
+      decal.lookAt(decal.position.clone().add(worldNormal));
+      
+      scene.add(decal);
+      bulletDecals.push({ mesh: decal, life: 100 });
+      
+      if (bulletDecals.length > 50) {
+        const old = bulletDecals.shift();
+        if (old) {
+          scene.remove(old.mesh);
+          old.mesh.geometry.dispose();
+          (old.mesh.material as THREE.Material).dispose();
+        }
+      }
+    };
+
     // 1. Initialize Three.js WebGL Renderer with Shadows and Fog
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#0b0f19'); // Deep cosmic cyber blue
+    scene.background = new THREE.Color('#1e293b'); // Tactical daytime warehouse slate grey
     
     // Smooth linear fog that keeps the direct view very clear and bright ("nao deixe escuro de mais")
-    scene.fog = new THREE.Fog('#0b0f19', 18, 70);
+    scene.fog = new THREE.Fog('#1e293b', 22, 85); // Pushed back fog to ensure perfect view under bright warehouse light
 
     const camera = new THREE.PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -421,25 +592,27 @@ export default function App() {
 
     // Handle Window Resize via ResizeObserver to support split screens or canvas shifts seamlessly
     const resizeObserver = new ResizeObserver(() => {
-      if (!canvas.clientWidth || !canvas.clientHeight) return;
-      camera.aspect = canvas.clientWidth / canvas.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+      requestAnimationFrame(() => {
+        if (!canvas || !canvas.clientWidth || !canvas.clientHeight) return;
+        camera.aspect = canvas.clientWidth / canvas.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+      });
     });
     resizeObserver.observe(canvas);
 
-    // 2. Add Radiant Arena Lighting (Brighter, beautiful cyber glow)
+    // 2. Add Radiant Arena Lighting (Realistic Industrial Daylight)
     // Ambient baseline so shadows are never dark or pitch black
-    const ambientLight = new THREE.AmbientLight('#ffffff', 0.85);
+    const ambientLight = new THREE.AmbientLight('#ffffff', 0.65);
     scene.add(ambientLight);
 
     // Hemisphere light representing overhead blue sky dome and warm cyber bounce
-    const hemiLight = new THREE.HemisphereLight('#cbd5e1', '#1e293b', 1.0);
+    const hemiLight = new THREE.HemisphereLight('#f1f5f9', '#334155', 0.85); // Slate blue dome to warm concrete floor bounce
     hemiLight.position.set(0, 50, 0);
     scene.add(hemiLight);
 
     // Main warm golden directional sun light casting high quality shadows
-    const skyLight = new THREE.DirectionalLight('#fef08a', 2.2);
+    const skyLight = new THREE.DirectionalLight('#fffbeb', 2.5); // Rich warm direct sunlight
     skyLight.position.set(20, 50, 15);
     skyLight.castShadow = true;
     skyLight.shadow.mapSize.width = 2048;
@@ -456,17 +629,17 @@ export default function App() {
     skyLight.shadow.bias = -0.0003;
     scene.add(skyLight);
 
-    // Neon purple rim fill light from the opposite corner
-    const fillLight = new THREE.DirectionalLight('#c084fc', 1.3);
+    // Soft cool fill light from the opposite corner for realistic shadows
+    const fillLight = new THREE.DirectionalLight('#94a3b8', 0.95);
     fillLight.position.set(-20, 35, -20);
     scene.add(fillLight);
 
-    // 3. Build Retro-Cyber Arena Floor
+    // 3. Build Realistic Industrial Concrete Floor
     const floorGeo = new THREE.PlaneGeometry(62, 62);
     const floorMat = new THREE.MeshStandardMaterial({ 
-      color: '#0e1726', // metallic cyber slate
-      roughness: 0.35,
-      metalness: 0.65
+      color: '#2d3748', // Dusty graphite slate concrete grey
+      roughness: 0.85,  // Matte non-reflective raw concrete surface textures
+      metalness: 0.2
     });
     const floor = new THREE.Mesh(floorGeo, floorMat);
     floor.rotation.x = -Math.PI / 2;
@@ -474,27 +647,27 @@ export default function App() {
     floor.receiveShadow = true;
     scene.add(floor);
 
-    // Grid Floor Overlay
-    const gridHelper = new THREE.GridHelper(62, 31, '#6366f1', '#1e1b4b'); // vibrant indigo grids
+    // Grid Floor Overlay representing factory floor panel tiles
+    const gridHelper = new THREE.GridHelper(62, 31, '#475569', '#1e293b'); // Subtle industrial slate lines
     gridHelper.position.y = 0.005;
     scene.add(gridHelper);
 
-    // Central Glowing Combat Ring Decal
+    // Central Tactical Combat Ring Decal
     const ringGeo = new THREE.RingGeometry(5.8, 6.0, 32);
-    const ringMat = new THREE.MeshBasicMaterial({ color: '#818cf8', side: THREE.DoubleSide });
+    const ringMat = new THREE.MeshBasicMaterial({ color: '#52525b', side: THREE.DoubleSide }); // Matte dark grey tactical ring
     const centerRing = new THREE.Mesh(ringGeo, ringMat);
     centerRing.rotation.x = -Math.PI / 2;
     centerRing.position.set(0, 0.01, 0);
     scene.add(centerRing);
 
-    // Floating corner decorative glowing floor decals
+    // Floating corner decorative tactical hazard indicators
     const decGroup = new THREE.Group();
     const decLocs = [-28, 28];
     decLocs.forEach(dx => {
       decLocs.forEach(dz => {
-        // Quick corner mesh indicators
+        // Warning-yellow floor bounds marks
         const mGeo = new THREE.BoxGeometry(1.5, 0.01, 0.15);
-        const mMat = new THREE.MeshBasicMaterial({ color: '#fb7185' });
+        const mMat = new THREE.MeshBasicMaterial({ color: '#ca8a04' });
         
         const m1 = new THREE.Mesh(mGeo, mMat);
         m1.position.set(dx, 0.01, dz);
@@ -512,9 +685,9 @@ export default function App() {
     const wallHeight = 4.8;
     const boundaryWallsGroup = new THREE.Group();
     const wallMat = new THREE.MeshStandardMaterial({ 
-      color: '#111827', 
-      roughness: 0.75,
-      metalness: 0.4
+      color: '#27272a', // Raw brick/concrete dark grey panels
+      roughness: 0.85,
+      metalness: 0.1
     });
 
     // North Wall
@@ -549,43 +722,43 @@ export default function App() {
 
     scene.add(boundaryWallsGroup);
 
-    // Laser neon runners along the top of all perimeter walls
-    const topGlowMat = new THREE.MeshBasicMaterial({ color: '#38bdf8' });
-    const wallGlowNGeo = new THREE.BoxGeometry(62, 0.1, 0.1);
+    // Steel support runners along the top of all perimeter walls
+    const topGlowMat = new THREE.MeshStandardMaterial({ color: '#475569', roughness: 0.5, metalness: 0.8 });
+    const wallGlowNGeo = new THREE.BoxGeometry(62, 0.15, 0.15);
     const wallGlowN = new THREE.Mesh(wallGlowNGeo, topGlowMat);
-    wallGlowN.position.set(0, wallHeight - 0.05, -30.3);
+    wallGlowN.position.set(0, wallHeight - 0.07, -30.3);
     scene.add(wallGlowN);
 
     const wallGlowS = new THREE.Mesh(wallGlowNGeo, topGlowMat);
-    wallGlowS.position.set(0, wallHeight - 0.05, 30.3);
+    wallGlowS.position.set(0, wallHeight - 0.07, 30.3);
     scene.add(wallGlowS);
 
-    const wallGlowEGeo = new THREE.BoxGeometry(0.1, 0.1, 62);
+    const wallGlowEGeo = new THREE.BoxGeometry(0.15, 0.15, 62);
     const wallGlowE = new THREE.Mesh(wallGlowEGeo, topGlowMat);
-    wallGlowE.position.set(30.3, wallHeight - 0.05, 0);
+    wallGlowE.position.set(30.3, wallHeight - 0.07, 0);
     scene.add(wallGlowE);
 
     const wallGlowW = new THREE.Mesh(wallGlowEGeo, topGlowMat);
-    wallGlowW.position.set(-30.3, wallHeight - 0.05, 0);
+    wallGlowW.position.set(-30.3, wallHeight - 0.07, 0);
     scene.add(wallGlowW);
 
-    // 4. Scatter Tactical Obstacles (Detailed Sci-Fi Crates with corner iron ribs and central energy bands)
+    // 4. Scatter Tactical Obstacles (Realistic Cargo Crates and Concrete Barriers)
     const obstacles: { box: THREE.Box3; mesh: THREE.Mesh }[] = [];
     const obstacleSpecs = [
       // Central Block Structure
-      { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#312e81' }, // Deep Indigo Base
+      { size: [6, 4, 6] as [number, number, number], pos: [0, 2, 0] as [number, number, number], color: '#3f4e3c' }, // Olive Drab Base
       
       // Crates scattered
-      { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1e293b' },
-      { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#1e293b' },
-      { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#4338ca' },
-      { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#4338ca' },
+      { size: [2.5, 2.5, 2.5] as [number, number, number], pos: [-12, 1.25, -12] as [number, number, number], color: '#1c1917' }, // Dark wood / carbon
+      { size: [3, 3, 3] as [number, number, number], pos: [12, 1.5, 12] as [number, number, number], color: '#1c1917' },
+      { size: [2, 3.5, 2] as [number, number, number], pos: [-15, 1.75, 10] as [number, number, number], color: '#3f4e3c' },
+      { size: [4, 2, 2] as [number, number, number], pos: [10, 1.0, -14] as [number, number, number], color: '#7c2d12' }, // Rust orange crate
       
       // Corners structures
-      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#0f172a' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#0f172a' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#0f172a' },
-      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#0f172a' }
+      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, -24] as [number, number, number], color: '#27272a' },
+      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, -24] as [number, number, number], color: '#27272a' },
+      { size: [3, 4.5, 3] as [number, number, number], pos: [-24, 2.25, 24] as [number, number, number], color: '#27272a' },
+      { size: [3, 4.5, 3] as [number, number, number], pos: [24, 2.25, 24] as [number, number, number], color: '#27272a' }
     ];
 
     obstacleSpecs.forEach((spec) => {
@@ -596,8 +769,8 @@ export default function App() {
       const geo = new THREE.BoxGeometry(...spec.size);
       const mat = new THREE.MeshStandardMaterial({ 
         color: spec.color,
-        roughness: 0.35,
-        metalness: 0.65
+        roughness: 0.8,
+        metalness: 0.25
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.userData = { isObstacle: true };
@@ -607,7 +780,7 @@ export default function App() {
 
       // Detail framing
       const [sx, sy, sz] = spec.size;
-      const trimMat = new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.25, metalness: 0.85 });
+      const trimMat = new THREE.MeshStandardMaterial({ color: '#52525b', roughness: 0.7, metalness: 0.6 });
       
       // Top plate collar
       const topPlateGeo = new THREE.BoxGeometry(sx + 0.1, 0.08, sz + 0.1);
@@ -623,10 +796,11 @@ export default function App() {
       bottomPlate.receiveShadow = true;
       g.add(bottomPlate);
 
-      // Neon energy band tracing the core
+      // Tactical yellow hazard band warning
       const energyGeo = new THREE.BoxGeometry(sx + 0.04, 0.12, sz + 0.04);
-      const energyMat = new THREE.MeshBasicMaterial({ 
-        color: spec.color === '#312e81' ? '#38bdf8' : '#fb7185' // glowing blue/pink laser belts
+      const energyMat = new THREE.MeshStandardMaterial({ 
+        color: '#ca8a04', // Warning gold hazard stripe around containers
+        roughness: 0.7
       });
       const energy = new THREE.Mesh(energyGeo, energyMat);
       energy.position.y = 0;
@@ -639,12 +813,12 @@ export default function App() {
       obstacles.push({ box, mesh });
     });
 
-    // 4b. Add 4 Detailed Neon Columns (Tactful circular covers casting majestic shadows)
+    // 4b. Add 4 Concrete Support Columns with steel collars (Tactical realism)
     const columnsSpecs = [
-      { x: -18, z: -6, color: '#06b6d4' }, // Cyan pillar
-      { x: 18, z: 6, color: '#f43f5e' },  // Pink pillar
-      { x: -6, z: 18, color: '#f43f5e' }, // Pink pillar
-      { x: 6, z: -18, color: '#06b6d4' }  // Cyan pillar
+      { x: -18, z: -6 },
+      { x: 18, z: 6 },
+      { x: -6, z: 18 },
+      { x: 6, z: -18 }
     ];
 
     columnsSpecs.forEach((col) => {
@@ -653,22 +827,24 @@ export default function App() {
 
       // Heavy Iron Base
       const baseGeo = new THREE.CylinderGeometry(0.48, 0.55, 0.5, 8);
-      const baseMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.2, metalness: 0.85 });
+      const baseMat = new THREE.MeshStandardMaterial({ color: '#3f3f46', roughness: 0.5, metalness: 0.7 });
       const base = new THREE.Mesh(baseGeo, baseMat);
       base.position.y = 0.25;
       base.castShadow = true;
       base.receiveShadow = true;
       g.add(base);
 
-      // Glowing Glass Core Light tube
-      const tubeGeo = new THREE.CylinderGeometry(0.2, 0.2, 3.8, 8);
-      const tubeMat = new THREE.MeshBasicMaterial({ color: col.color });
+      // Rugged Concrete Column Core
+      const tubeGeo = new THREE.CylinderGeometry(0.35, 0.35, 3.8, 12);
+      const tubeMat = new THREE.MeshStandardMaterial({ color: '#71717a', roughness: 0.9, metalness: 0.1 });
       const tube = new THREE.Mesh(tubeGeo, tubeMat);
       tube.position.y = 2.4;
+      tube.castShadow = true;
+      tube.receiveShadow = true;
       g.add(tube);
 
-      // Supporting Iron collar
-      const collarGeo = new THREE.TorusGeometry(0.28, 0.06, 8, 16);
+      // Supporting Iron collar (Rusted steel fitting midway)
+      const collarGeo = new THREE.TorusGeometry(0.38, 0.06, 8, 16);
       const collarMat = new THREE.MeshStandardMaterial({ color: '#334155', metalness: 0.95 });
       const collar = new THREE.Mesh(collarGeo, collarMat);
       collar.rotation.x = Math.PI / 2;
@@ -685,41 +861,41 @@ export default function App() {
       obstacles.push({ box, mesh: base });
     });
 
-    // 5. Create Local Player's Weapon (Detailed Rail Rifle with scope visor & silencer)
+    // 5. Create Local Player's Weapon (Detailed Tactical Assault Rifle with precision sight & muzzle)
     const localWeaponGroup = new THREE.Group();
     
-    // Slanted Barrel Guard
+    // Matte Graphite Gun Body
     const gunBodyGeo = new THREE.BoxGeometry(0.1, 0.08, 0.38);
-    const gunBodyMat = new THREE.MeshStandardMaterial({ color: '#0f172a', metalness: 0.8, roughness: 0.3 });
+    const gunBodyMat = new THREE.MeshStandardMaterial({ color: '#18181b', metalness: 0.8, roughness: 0.65 }); // Deep matte tactical black
     const gunBody = new THREE.Mesh(gunBodyGeo, gunBodyMat);
     gunBody.position.set(0, 0, 0);
     localWeaponGroup.add(gunBody);
 
-    // Upper Holographic sight scope
+    // Upper Iron sight / holographic sight scope
     const scopeGeo = new THREE.BoxGeometry(0.018, 0.035, 0.12);
-    const scopeMat = new THREE.MeshStandardMaterial({ color: '#1e293b', metalness: 0.6, roughness: 0.4 });
+    const scopeMat = new THREE.MeshStandardMaterial({ color: '#27272a', metalness: 0.8, roughness: 0.5 });
     const scope = new THREE.Mesh(scopeGeo, scopeMat);
     scope.position.set(0, 0.055, -0.05);
     localWeaponGroup.add(scope);
 
-    // Glowing Laser emission lens
+    // Precision optic lens (Dark blue anti-glare reflex sight rather than glowing neon)
     const lensGeo = new THREE.BoxGeometry(0.012, 0.012, 0.01);
-    const lensMat = new THREE.MeshBasicMaterial({ color: '#06b6d4' }); // cyan laser spot
+    const lensMat = new THREE.MeshStandardMaterial({ color: '#1d4ed8', metalness: 0.9, roughness: 0.1 }); // realistic multi-coated lens
     const lens = new THREE.Mesh(lensGeo, lensMat);
     lens.position.set(0, 0.055, -0.11);
     localWeaponGroup.add(lens);
 
-    // Extended front Silencer muzzle barrel
+    // Ruffled gun barrel muzzle
     const muzzleGeo = new THREE.CylinderGeometry(0.018, 0.018, 0.16, 8);
-    const muzzleMat = new THREE.MeshStandardMaterial({ color: '#1e293b', metalness: 0.9, roughness: 0.1 });
+    const muzzleMat = new THREE.MeshStandardMaterial({ color: '#3f3f46', metalness: 0.85, roughness: 0.35 }); // gunmetal steel barrel
     const muzzle = new THREE.Mesh(muzzleGeo, muzzleMat);
     muzzle.rotation.x = Math.PI / 2;
     muzzle.position.set(0, 0, -0.25);
     localWeaponGroup.add(muzzle);
 
-    // Neon Core Energy strip (Sides of gun body)
+    // Walnut wood tactical custom handguard (adds a high-quality realism polish)
     const gunNeonGeo = new THREE.BoxGeometry(0.112, 0.02, 0.18);
-    const gunNeonMat = new THREE.MeshBasicMaterial({ color: '#f43f5e' }); // hot rose energy core
+    const gunNeonMat = new THREE.MeshStandardMaterial({ color: '#7c2d12', roughness: 0.9, metalness: 0.1 }); // Walnut/mahogany composite body plating
     const gunNeon = new THREE.Mesh(gunNeonGeo, gunNeonMat);
     gunNeon.position.set(0, 0.015, -0.04);
     localWeaponGroup.add(gunNeon);
@@ -1030,7 +1206,7 @@ export default function App() {
     const handleMouseMove = (e: MouseEvent) => {
       if (document.pointerLockElement !== canvas) return;
 
-      const sensitivity = 0.0022;
+      const sensitivity = sensitivityRef.current;
       stateRef.current.yaw -= e.movementX * sensitivity;
       stateRef.current.pitch -= e.movementY * sensitivity;
 
@@ -1044,7 +1220,7 @@ export default function App() {
     };
 
     canvas.addEventListener('click', () => {
-      canvas.requestPointerLock?.();
+      safeRequestPointerLock(canvas);
     });
 
     window.addEventListener('keydown', handleKeyDown);
@@ -1074,6 +1250,10 @@ export default function App() {
         camera.remove(flashLight);
       }, 50);
 
+      // Gun muzzle smoke simulation
+      const muzzleWorldPos = new THREE.Vector3(0.18, -0.22, -0.85).applyMatrix4(camera.matrixWorld);
+      spawnSmoke(muzzleWorldPos, 5);
+
       // Hit Verification via central Raycast
       const raycaster = new THREE.Raycaster();
       // Center coordinates represent the exact crosshair target pixel
@@ -1085,6 +1265,25 @@ export default function App() {
 
       // Intersect both players and walls/pillars to block double hits behind structures
       const intersects = raycaster.intersectObjects([...targetHitboxes, ...arenaObstaclesMesh]);
+
+      // Draw local gorgeous amber golden tracer trail
+      let tracerEnd = new THREE.Vector3();
+      const cameraDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+      tracerEnd.copy(camera.position).addScaledVector(cameraDir, 50);
+
+      if (intersects.length > 0) {
+        tracerEnd.copy(intersects[0].point);
+      }
+
+      const traceGeo = new THREE.BufferGeometry().setFromPoints([muzzleWorldPos, tracerEnd]);
+      const traceMat = new THREE.LineBasicMaterial({ color: '#ca8a04', linewidth: 1.5 }); // warm bronze bullet tracer
+      const traceLine = new THREE.Line(traceGeo, traceMat);
+      scene.add(traceLine);
+      setTimeout(() => {
+        scene.remove(traceLine);
+        traceGeo.dispose();
+        traceMat.dispose();
+      }, 65);
 
       if (intersects.length > 0) {
         // Evaluate the absolute nearest entity hit
@@ -1157,6 +1356,14 @@ export default function App() {
           playHitSound();
           setIsHitmarkerActive(true);
           setTimeout(() => setIsHitmarkerActive(false), 140);
+        } else {
+          // Hits walls, boundary margins, columns or custom obstacles! Place a bullet impact decal
+          const hitPoint = intersects[0].point;
+          let worldNormal = new THREE.Vector3(0, 1, 0);
+          if (intersects[0].face) {
+            worldNormal.copy(intersects[0].face.normal).transformDirection(hitObj.matrixWorld);
+          }
+          spawnBulletDecal(hitPoint, worldNormal);
         }
       }
     };
@@ -1274,6 +1481,44 @@ export default function App() {
         camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, -Math.PI / 4, 3 * dt);
       }
 
+      // Rotate, rise, shrink, and fade out muzzle smoke particles with thermal draft
+      for (let i = smokeParticles.length - 1; i >= 0; i--) {
+        const p = smokeParticles[i];
+        p.life -= 1;
+        p.mesh.position.addScaledVector(p.vel, dt);
+        
+        // Slowly shrink scale and fade opacity
+        const lifeRatio = p.life / p.maxLife;
+        p.mesh.scale.setScalar(lifeRatio);
+        
+        const mat = p.mesh.material as THREE.MeshBasicMaterial;
+        mat.opacity = lifeRatio * 0.45;
+        
+        if (p.life <= 0) {
+          scene.remove(p.mesh);
+          p.mesh.geometry.dispose();
+          mat.dispose();
+          smokeParticles.splice(i, 1);
+        }
+      }
+
+      // Fade out bullet decals slowly over their lifespan
+      for (let i = bulletDecals.length - 1; i >= 0; i--) {
+        const d = bulletDecals[i];
+        d.life -= dt * 4.5; // slow expiration rate
+        if (d.life <= 0) {
+          scene.remove(d.mesh);
+          d.mesh.geometry.dispose();
+          (d.mesh.material as THREE.Material).dispose();
+          bulletDecals.splice(i, 1);
+        } else {
+          const mat = d.mesh.material as THREE.MeshBasicMaterial;
+          if (d.life < 20) {
+            mat.opacity = d.life / 20;
+          }
+        }
+      }
+
       // Update stateRef container variables
       stateRef.current.x = camera.position.x;
       stateRef.current.y = camera.position.y;
@@ -1295,45 +1540,215 @@ export default function App() {
         });
       }
 
-      // If we are in local TREINO (Practice Mode), make the single target training dummy move/patrol
+      // If we are in local TREINO (Practice Mode), execute advanced hostile intelligence for Recruta_Elite and Sargento_Alpha
       if (currentRoom === 'TREINO') {
-        const dummy = joinedPlayersRef.current['dummy'];
-        if (dummy && dummy.health > 0) {
-          // Patrol pattern using sin/cos of elapsed seconds
-          const elapsedSecs = now * 0.0012;
-          const orbitRadiusX = 8.0;
-          const orbitRadiusZ = 5.0;
-          const centerZ = -10.0;
-          const dx = Math.sin(elapsedSecs) * orbitRadiusX;
-          const dz = centerZ + Math.cos(elapsedSecs * 0.6) * orbitRadiusZ;
+        const botIds = ['dummy1', 'dummy2'];
+        
+        botIds.forEach(bId => {
+          const bot = joinedPlayersRef.current[bId];
+          if (!bot) return;
 
-          // Compute raw angle to face the walk path
-          const lastX = dummy.x;
-          const lastZ = dummy.z;
-          const nextYaw = Math.atan2(dx - lastX, dz - lastZ);
+          const ai = botAIStates[bId];
+          if (!ai) return;
 
-          // Direct edit on ref to ensure instantaneous frame synchrony
-          dummy.x = dx;
-          dummy.z = dz;
-          dummy.yaw = nextYaw;
+          // If the bot has no health left, they remain down (defeated state)
+          if (bot.health <= 0) {
+            return;
+          }
 
-          setJoinedPlayers(prev => {
-            if (!prev['dummy']) return prev;
-            return {
-              ...prev,
-              'dummy': {
-                ...prev['dummy'],
-                x: dx,
-                z: dz,
-                yaw: nextYaw
+          // 1. Pathing & Movement AI (Dodge movement within the arena)
+          const curPos = new THREE.Vector3(bot.x, 0, bot.z);
+          const tgtPos = new THREE.Vector3(ai.targetX, 0, ai.targetZ);
+          const distToTgt = curPos.distanceTo(tgtPos);
+
+          ai.changeTimer -= dt;
+          if (distToTgt < 1.2 || ai.changeTimer <= 0) {
+            // Pick a new combat position inside the 62x62 boundary to circle or duck behind cover
+            ai.targetX = (Math.random() * 42) - 21;
+            ai.targetZ = (Math.random() * 42) - 21;
+            ai.changeTimer = Math.random() * 4.0 + 3.0; // shift heading every 3-7 seconds
+          }
+
+          // Steer smoothly towards target position
+          const dirToTgt = tgtPos.clone().sub(curPos).normalize();
+          let speedFactor = 1.0;
+          if (botDifficultyRef.current === 'easy') {
+            speedFactor = 0.65;
+          } else if (botDifficultyRef.current === 'hardcore') {
+            speedFactor = 1.4;
+          }
+          const speed = (bId === 'dummy1' ? 3.6 : 2.8) * speedFactor;
+          
+          curPos.addScaledVector(dirToTgt, speed * dt);
+          bot.x = curPos.x;
+          bot.z = curPos.z;
+
+          // 2. Head & Arm Aiming direction towards player
+          const playerPosVec = new THREE.Vector3(camera.position.x, 0, camera.position.z);
+          const dirToPlayer = playerPosVec.clone().sub(new THREE.Vector3(bot.x, 0, bot.z));
+          const distToPlayer = dirToPlayer.length();
+          dirToPlayer.normalize();
+
+          // Heading yaw rotation to look at player
+          bot.yaw = Math.atan2(dirToPlayer.x, dirToPlayer.z);
+
+          // Vertical look pitch estimation
+          const dY = camera.position.y - 0.9;
+          bot.pitch = Math.atan2(dY, distToPlayer);
+
+          // 3. Raycast Line-of-Sight and shooting logic
+          const botChest = new THREE.Vector3(bot.x, 0.9, bot.z);
+          const playerHead = new THREE.Vector3(camera.position.x, camera.position.y - 0.2, camera.position.z);
+          const losDir = playerHead.clone().sub(botChest);
+          const losDist = losDir.length();
+          losDir.normalize();
+
+          const losRay = new THREE.Raycaster(botChest, losDir, 0.1, 45);
+          const arenaObstaclesMesh = obstacles.map(item => item.mesh);
+          const intersects = losRay.intersectObjects(arenaObstaclesMesh);
+
+          let hasLOS = true;
+          if (intersects.length > 0) {
+            // If closest wall hit is closer than local player, blocked view!
+            if (intersects[0].distance < losDist) {
+              hasLOS = false;
+            }
+          }
+
+          // If player is alive and within range and we have direct sighting
+          if (hasLOS && stateRef.current.health > 0 && losDist < 36) {
+            ai.shootCooldown -= dt;
+            if (ai.shootCooldown <= 0) {
+              // Reset tactical firing countdown depending on selected difficulty
+              let baseCooldown = 1.0;
+              if (botDifficultyRef.current === 'easy') {
+                baseCooldown = Math.random() * 1.5 + 1.6; // slow firing
+              } else if (botDifficultyRef.current === 'hardcore') {
+                baseCooldown = Math.random() * 0.35 + 0.45; // ultra fast
+              } else {
+                baseCooldown = Math.random() * 0.75 + 0.85; // medium
               }
-            };
-          });
-        }
+              ai.shootCooldown = baseCooldown;
+
+              // Fire gunshot sound
+              playGunshotSound();
+
+              // Trigger barrel muzzle smoke
+              const botMuzzle = botChest.clone().addScaledVector(losDir, 0.85);
+              spawnSmoke(botMuzzle, 4);
+
+              // Firing muzzle light
+              const botFlash = new THREE.PointLight('#fbbf24', 4, 3);
+              botFlash.position.copy(botMuzzle);
+              scene.add(botFlash);
+              setTimeout(() => scene.remove(botFlash), 50);
+
+              // Aiming spread accuracy bounds scaled by difficulty level
+              let diffSpreadMod = 1.0;
+              if (botDifficultyRef.current === 'easy') {
+                diffSpreadMod = 2.2;
+              } else if (botDifficultyRef.current === 'hardcore') {
+                diffSpreadMod = 0.5;
+              }
+              const spreadFactor = (bId === 'dummy1' ? 0.38 : 0.22) * diffSpreadMod;
+              const tracerEnd = playerHead.clone().add(new THREE.Vector3(
+                (Math.random() - 0.5) * spreadFactor * 2,
+                (Math.random() - 0.5) * spreadFactor * 2,
+                (Math.random() - 0.5) * spreadFactor * 2
+              ));
+
+              // Draw beautiful bronze bullet tracer trail line
+              const tracerGeo = new THREE.BufferGeometry().setFromPoints([botMuzzle, tracerEnd]);
+              const tracerMat = new THREE.LineBasicMaterial({ color: '#f59e0b', linewidth: 1.5 });
+              const tracerLine = new THREE.Line(tracerGeo, tracerMat);
+              scene.add(tracerLine);
+              setTimeout(() => {
+                scene.remove(tracerLine);
+                tracerGeo.dispose();
+                tracerMat.dispose();
+              }, 65);
+
+              // Verify damage landing
+              const errorMag = tracerEnd.distanceTo(playerHead);
+              if (errorMag < 0.65) {
+                // Precise Shot landed on the player! Deduct health
+                const damage = bId === 'dummy1' ? 12 : 18; // Sargento Alpha delivers heavier punch
+                const nextHp = Math.max(0, stateRef.current.health - damage);
+                
+                stateRef.current.health = nextHp;
+                setLocalHealth(nextHp);
+
+                // Flash red viewport spatter warning
+                setLocalHealthFlashAlert(true);
+                setTimeout(() => setLocalHealthFlashAlert(false), 200);
+                playHitSound();
+
+                if (nextHp <= 0) {
+                  const feedId = Math.random().toString();
+                  const killFeedEntry: KillFeedEntry = {
+                    id: feedId,
+                    attacker: bot.name,
+                    victim: playerName,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  };
+                  setKillFeed(feed => [killFeedEntry, ...feed].slice(0, 5));
+                  playEliminationSound();
+                  setTimeout(() => {
+                    setKillFeed(feed => feed.filter(f => f.id !== feedId));
+                  }, 4500);
+
+                  // Set score death counter
+                  setJoinedPlayers(next => {
+                    const copy = { ...next };
+                    if (copy['solo']) copy['solo'].deaths += 1;
+                    if (copy[bId]) copy[bId].kills += 1;
+                    return copy;
+                  });
+                }
+              } else {
+                // Shot missed player! Raycast trail directly over wall, paint wall impact bullet decal
+                const bulletRay = new THREE.Raycaster(botMuzzle, tracerEnd.clone().sub(botMuzzle).normalize());
+                const wallHits = bulletRay.intersectObjects(arenaObstaclesMesh);
+                if (wallHits.length > 0) {
+                  const hPoint = wallHits[0].point;
+                  const hNormal = wallHits[0].face ? wallHits[0].face.normal.clone().transformDirection(wallHits[0].object.matrixWorld) : new THREE.Vector3(0, 1, 0);
+                  spawnBulletDecal(hPoint, hNormal);
+                }
+              }
+            }
+          }
+
+          bot.isShooting = (ai.shootCooldown < 0.1);
+        });
+
+        // Trigger react synchronization
+        setJoinedPlayers({ ...joinedPlayersRef.current });
       }
 
       // Synchronize remote player block representation states
       syncRemotePlayers();
+
+      // Dynamic weapon skin configuration update
+      if (gunBodyMat) {
+        if (selectedSkinRef.current === 'gold') {
+          gunBodyMat.color.set('#eab308'); // Golden yellow/brass
+          gunBodyMat.metalness = 0.95;
+          gunBodyMat.roughness = 0.12;
+        } else if (selectedSkinRef.current === 'arctic') {
+          gunBodyMat.color.set('#f8fafc'); // Arctic white
+          gunBodyMat.metalness = 0.15;
+          gunBodyMat.roughness = 0.8;
+        } else if (selectedSkinRef.current === 'rust') {
+          gunBodyMat.color.set('#b45309'); // Rust orange copper/walnut wood warmth
+          gunBodyMat.metalness = 0.65;
+          gunBodyMat.roughness = 0.45;
+        } else {
+          // Classic Graphite Matte Black
+          gunBodyMat.color.set('#18181b');
+          gunBodyMat.metalness = 0.8;
+          gunBodyMat.roughness = 0.65;
+        }
+      }
 
       // Fire Render Frame
       renderer.render(scene, camera);
@@ -1570,27 +1985,216 @@ export default function App() {
             />
           )}
 
-          {/* RETRO POINTER LOCK ALERT SCREEN COVERS (WHEN UNCLICKED) */}
+          {/* TACTICAL ESCAPE / PAUSED GAME MENU OVERLAY (WHEN UNLOCKED) */}
           {!pointerLocked && (
             <div 
               id="pointer-lock-overlay" 
-              className="absolute inset-0 bg-slate-950/85 flex flex-col items-center justify-center p-6 text-center z-30 transition-all backdrop-blur-sm cursor-pointer"
+              className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-4 sm:p-6 text-center z-30 transition-all backdrop-blur-md"
               onClick={() => {
-                canvasRef.current?.requestPointerLock?.();
+                // If they click the backdrop, request pointer lock to continue
+                safeRequestPointerLock(canvasRef.current);
               }}
             >
-              <div id="pl-wrapper" className="max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl flex flex-col items-center">
-                <CircleDot className="w-12 h-12 text-blue-400 animate-ping mb-4" />
-                <h3 className="text-lg font-black text-white">CLIQUE PARA JOGAR</h3>
-                <p className="text-slate-400 text-xs mt-2 leading-relaxed">
-                  Para habilitar o controle de câmera de primeira pessoa e a mira do mouse, o navegador precisa obter captura de cursor.
-                </p>
-                <button 
-                  id="btn-lock-pointer"
-                  className="mt-5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 px-6 py-2.5 rounded-xl text-xs font-black text-white tracking-widest uppercase shadow-md active:scale-95"
-                >
-                  Capturar Mouse
-                </button>
+              <div 
+                id="esc-menu-card" 
+                className="max-w-2xl w-full bg-slate-900/95 border-2 border-slate-700/70 rounded-2xl p-5 sm:p-6 shadow-2xl flex flex-col gap-5 text-left divide-y divide-slate-800 relative animate-fade-in cursor-default"
+                onClick={(e) => {
+                  // VERY IMPORTANT: Prevent clicks inside the menu card from auto-capturing mouse pointer
+                  e.stopPropagation();
+                }}
+              >
+                
+                {/* MENU HEADER */}
+                <div id="esc-menu-header" className="flex items-center justify-between pb-2">
+                  <div className="flex items-center gap-2.5">
+                    <Sliders className="w-5 h-5 text-rose-500 animate-pulse" />
+                    <div>
+                      <h3 className="text-base font-black text-white tracking-widest uppercase">MENU DE PAUSA</h3>
+                      <p className="text-[10px] text-slate-400 font-semibold uppercase">Modo: {currentRoom === 'TREINO' ? 'Prática Offline' : 'Sala de Rede LAN'}</p>
+                    </div>
+                  </div>
+                  
+                  {/* Status indicator */}
+                  <div className="flex items-center gap-2 bg-slate-950/80 px-3 py-1.5 rounded-lg border border-slate-800 text-[10px] uppercase tracking-wider font-bold text-amber-400">
+                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                    <span>JOGO PAUSADO</span>
+                  </div>
+                </div>
+
+                {/* TWO-COLUMN GRID: CONFIGURATIONS AND STATS */}
+                <div id="esc-menu-body" className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-4">
+                  
+                  {/* LEFT COLUMN: CONTROLS & UTILITIES */}
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-indigo-400 uppercase tracking-widest border-b border-slate-800/60 pb-1.5 flex items-center gap-1">
+                      <Sliders className="w-3.5 h-3.5" /> Ajustes do Soldado
+                    </h4>
+
+                    {/* SLIDER: MOUSE SENSITIVITY */}
+                    <div id="sensitivity-slider-group" className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 space-y-1.5">
+                      <div className="flex justify-between items-center text-xs text-slate-300 font-bold">
+                        <span>Sensibilidade do Mouse</span>
+                        <span className="font-mono text-indigo-400 text-xs bg-indigo-950/50 px-2 py-0.5 rounded border border-indigo-900/35">
+                          {mouseSensitivity.toFixed(1)}x
+                        </span>
+                      </div>
+                      <input 
+                        id="sensitivity-range"
+                        type="range"
+                        min="0.5"
+                        max="6.0"
+                        step="0.1"
+                        value={mouseSensitivity}
+                        onChange={(e) => setMouseSensitivity(parseFloat(e.target.value))}
+                        className="w-full accent-indigo-500 bg-slate-800 h-1.5 rounded-lg appearance-none cursor-pointer"
+                      />
+                      <p className="text-[10px] text-slate-500 font-medium">Arraste para ajustar o controle de rotação e mira do soldado.</p>
+                    </div>
+
+                    {/* TOGGLE: SOUND MUTE */}
+                    <div id="mute-toggle-group" className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <span className="text-xs text-slate-300 font-bold block">Efeitos de Som</span>
+                        <span className="text-[10px] text-slate-500 font-medium block">Habilitar áudio procedural da arma e tiros</span>
+                      </div>
+                      <button
+                        id="btn-toggle-sound"
+                        type="button"
+                        onClick={() => setSoundMutedState(!soundMutedState)}
+                        className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 border transition-all ${
+                          soundMutedState 
+                            ? 'bg-rose-950/50 border-rose-500/40 text-rose-400' 
+                            : 'bg-emerald-950/40 border-emerald-500/30 text-emerald-400'
+                        }`}
+                      >
+                        {soundMutedState ? (
+                          <>
+                            <VolumeX className="w-4 h-4 text-rose-400" />
+                            MUTADO
+                          </>
+                        ) : (
+                          <>
+                            <Volume2 className="w-4 h-4 text-emerald-400" />
+                            SOMS ATIVOS
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* CHANGE NAME IN-GAME */}
+                    <div id="paused-rename-group" className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 space-y-2">
+                      <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Mudar Apelido da Sessão</label>
+                      <input 
+                        id="paused-rename-input"
+                        type="text"
+                        value={playerName}
+                        onChange={(e) => handleNameChange(e.target.value)}
+                        placeholder="Novo nome..."
+                        className="w-full bg-slate-900 border border-slate-700/60 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+
+                    {/* TACTICAL RESPAWN / FULL HEAL CHEAT BUTTON */}
+                    <button
+                      id="btn-revive-instantly"
+                      type="button"
+                      onClick={() => {
+                        // Safe teleport respawn and health restoration
+                        stateRef.current.x = (Math.random() * 6) - 3;
+                        stateRef.current.z = (Math.random() * 6) + 12;
+                        stateRef.current.health = 100;
+                        setLocalHealth(100);
+                        playEliminationSound();
+                        
+                        // If offline bots exist, restore their health too for refreshing targets!
+                        if (currentRoom === 'TREINO') {
+                          setJoinedPlayers(prev => {
+                            const updated = { ...prev };
+                            if (updated['dummy1']) updated['dummy1'].health = 100;
+                            if (updated['dummy2']) updated['dummy2'].health = 105; // sergeant extra beef
+                            return updated;
+                          });
+                        }
+                      }}
+                      className="w-full bg-slate-850 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/70 hover:border-slate-500 py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-rose-500 animate-spin" style={{ animationDuration: '4s' }} />
+                      Reviver / Auto-Cura Completa
+                    </button>
+                  </div>
+
+                  {/* RIGHT COLUMN: REAL-TIME PLACAR / STATS */}
+                  <div className="space-y-3.5">
+                    <h4 className="text-xs font-bold text-rose-400 uppercase tracking-widest border-b border-slate-800/60 pb-1.5 flex items-center gap-1">
+                      <Award className="w-3.5 h-3.5" /> Estatísticas do Placar
+                    </h4>
+
+                    {/* COMPACT BOARD TABLE */}
+                    <div id="esc-placar-wrapper" className="bg-slate-950/65 rounded-xl border border-slate-800/80 p-2 overflow-y-auto max-h-[190px]">
+                      <table className="w-full text-left text-[11px]">
+                        <thead>
+                          <tr className="text-slate-500 border-b border-slate-800 pb-1.5 uppercase font-bold tracking-wider text-[9px]">
+                            <th className="pb-1.5 pl-1">Jogador</th>
+                            <th className="pb-1.5 text-center">ELIMS</th>
+                            <th className="pb-1.5 text-center">MORTES</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/30">
+                          {Object.values(joinedPlayers)
+                            .sort((a: any, b: any) => b.kills - a.kills)
+                            .map((p: any) => (
+                              <tr key={p.id} className={`hover:bg-slate-800/20 ${p.id === localPlayerId ? 'bg-indigo-950/15 font-bold' : ''}`}>
+                                <td className="py-2 pl-1 flex items-center gap-1.5">
+                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
+                                  <span className="text-slate-200 truncate max-w-[100px]">{p.name} {p.id === localPlayerId ? '(Você)' : ''}</span>
+                                </td>
+                                <td className="py-2 text-center text-emerald-400 font-mono font-bold">{p.kills}</td>
+                                <td className="py-2 text-center text-rose-400 font-mono">{p.deaths}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div id="esc-network-info" className="bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 text-[10px] text-slate-400 leading-relaxed space-y-1.5">
+                      <div className="flex justify-between">
+                        <span>Código da Sala:</span>
+                        <span className="font-mono font-bold text-white bg-slate-800 px-1.5 py-0.5 rounded">{currentRoom}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Total de COMBATENTES:</span>
+                        <span className="font-bold text-rose-400">{Object.keys(joinedPlayers).length}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* BOTTOM PRIMARY BUTTONS ROW */}
+                <div id="esc-menu-footer" className="flex flex-col sm:flex-row gap-3 pt-4 justify-between">
+                  {/* BUTTON: LEAVE GAMES */}
+                  <button
+                    id="btn-esc-leave"
+                    type="button"
+                    onClick={leaveGame}
+                    className="bg-rose-950/40 hover:bg-rose-950/80 border border-rose-800/60 hover:border-rose-600 px-5 py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-rose-400 hover:text-white transition-all duration-150 flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                  >
+                    <LogOut className="w-4 h-4" /> Sair da Partida / Lobby
+                  </button>
+
+                  {/* BUTTON: RESUME / CAPTURE */}
+                  <button
+                    id="btn-esc-resume"
+                    type="button"
+                    onClick={() => {
+                      safeRequestPointerLock(canvasRef.current);
+                    }}
+                    className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs uppercase tracking-widest py-3 px-6 rounded-xl transition-all duration-150 shadow-md shadow-emerald-950/30 flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                  >
+                    <Target className="w-4 h-4 animate-spin" style={{ animationDuration: '6s' }} />
+                    Retomar Combate (Clique aqui)
+                  </button>
+                </div>
+
               </div>
             </div>
           )}
