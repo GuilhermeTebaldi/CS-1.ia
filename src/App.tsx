@@ -119,6 +119,12 @@ export default function App() {
   const [joinError, setJoinError] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
 
+  // Server Configuration states (highly robust for external connections e.g. Vercel client connecting to this Cloud Run backend)
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [serverUrl, setServerUrl] = useState(() => {
+    return localStorage.getItem('blocky_fps_server_url') || window.location.origin;
+  });
+
   // Gameplay HUD states
   const [localHealth, setLocalHealth] = useState(100);
   const [localHealthFlashAlert, setLocalHealthFlashAlert] = useState(false);
@@ -164,11 +170,19 @@ export default function App() {
 
   // Socket setup (only during connection setups)
   useEffect(() => {
-    const socket = io();
+    // clean up any trailing slash to avoid connection errors, default to origin space
+    const cleanedUrl = serverUrl ? serverUrl.trim().replace(/\/$/, "") : window.location.origin;
+    console.log("🔌 Conectando ao servidor Socket.IO:", cleanedUrl);
+    
+    const socket = io(cleanedUrl, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      timeout: 10000
+    });
     socketRef.current = socket;
 
     socket.on('connect_error', () => {
-      setJoinError('Conexão ao servidor falhou. Verifique se o servidor está online.');
+      setJoinError('Conexão ao servidor falhou. Verifique se o endereço do servidor está correto e online.');
     });
 
     socket.on('room:joined', (data: { success: boolean; roomCode: string; playerId: string; players: Record<string, PlayerState>; error?: string }) => {
@@ -270,7 +284,7 @@ export default function App() {
     return () => {
       socket.disconnect();
     };
-  }, []);
+  }, [serverUrl]);
 
   // Handle Create and Join Room functions
   const createRoom = () => {
@@ -929,6 +943,41 @@ export default function App() {
                 placeholder="Insira seu apelido..."
                 className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 font-semibold focus:outline-none focus:border-blue-500 transition-all shadow-inner"
               />
+            </div>
+
+            {/* FIELD: SERVER CONFIGURATION (Highly useful for custom deployments e.g Vercel/Localhost -> Cloud Run) */}
+            <div id="server-config-group" className="space-y-2 mb-5">
+              <button
+                type="button"
+                onClick={() => setShowServerConfig(!showServerConfig)}
+                className="text-[11px] text-slate-400 hover:text-slate-300 font-bold flex items-center gap-1.5 bg-slate-900/45 px-3 py-2 rounded-xl border border-slate-700/50 hover:border-slate-600 transition-all cursor-pointer select-none"
+              >
+                <Tv className="w-3.5 h-3.5 text-indigo-400" />
+                {showServerConfig ? 'Ocultar Configurações de Servidor' : 'Mostrar Configurações de Servidor'}
+              </button>
+
+              {showServerConfig && (
+                <div id="server-config-fields" className="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-2.5 animate-fade-in text-left">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
+                    Endereço do Servidor (Socket.IO)
+                  </label>
+                  <input
+                    id="input-server-url"
+                    type="text"
+                    value={serverUrl}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setServerUrl(val);
+                      localStorage.setItem('blocky_fps_server_url', val);
+                    }}
+                    placeholder="Ex: https://meu-servidor-fps.run.app"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-indigo-300 font-mono focus:outline-none focus:border-indigo-500 transition-all"
+                  />
+                  <p className="text-[10px] text-slate-500 leading-relaxed font-semibold">
+                    Se estiver jogando em um servidor externo (como Vercel), insira aqui a URL do seu servidor do AI Studio (Cloud Run) para sincronizar. Por padrão, conecta na origem da página (<code className="text-slate-400">{window.location.origin}</code>).
+                  </p>
+                </div>
+              )}
             </div>
 
             <div id="lobby-divider" className="border-t border-slate-700/60 my-5 relative">
