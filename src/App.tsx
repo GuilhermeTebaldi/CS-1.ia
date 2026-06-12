@@ -277,6 +277,7 @@ export default function App() {
   const isDeadRef = useRef(false);
   const isLoopingRef = useRef(false);
   const handleRespawnRef = useRef<() => void>();
+  const lastRemoteStateRenderRef = useRef(0);
 
   // Update client-side local health representation
   useEffect(() => {
@@ -408,6 +409,7 @@ export default function App() {
       }
       const player = joinedPlayersRef.current[data.id];
       if (!player) return;
+      const receivedAt = performance.now();
       const nextPlayers = {
         ...joinedPlayersRef.current,
         [data.id]: {
@@ -418,11 +420,14 @@ export default function App() {
           yaw: data.yaw,
           pitch: data.pitch,
           isShooting: data.isShooting,
-          __receivedAt: performance.now()
+          __receivedAt: receivedAt
         } as NetworkPlayerState
       };
       joinedPlayersRef.current = nextPlayers;
-      setJoinedPlayers(nextPlayers);
+      if (receivedAt - lastRemoteStateRenderRef.current > 80) {
+        lastRemoteStateRenderRef.current = receivedAt;
+        setJoinedPlayers(nextPlayers);
+      }
     };
 
     socket.on('player:sync', applySyncedPlayer);
@@ -436,6 +441,10 @@ export default function App() {
         setLocalHealthFlashAlert(true);
         setTimeout(() => setLocalHealthFlashAlert(false), 200);
         playHitSound();
+      } else {
+        playHitSound();
+        setIsHitmarkerActive(true);
+        setTimeout(() => setIsHitmarkerActive(false), 140);
       }
       
       setJoinedPlayers(prev => {
@@ -1488,20 +1497,27 @@ export default function App() {
     };
 
     // Listen to Shoot triggers specifically to emit flash vectors
-    const handleRemoteVisualShoot = (data: { id: string }) => {
+    const handleRemoteVisualShoot = (data: { id: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number }) => {
       const rm = remotePlayersMeshes[data.id];
-      if (!rm) return;
 
       // Create visual retro neon trajectory laser beam tracing the gun facing
       const laserGeo = new THREE.BufferGeometry();
-      const gunTipWorldPos = new THREE.Vector3();
-      rm.group.getWorldPosition(gunTipWorldPos);
-      gunTipWorldPos.y += 0.45; // adjustment near arm height
+      const gunTipWorldPos = data.x !== undefined && data.y !== undefined && data.z !== undefined
+        ? new THREE.Vector3(data.x, data.y + 1.05, data.z)
+        : new THREE.Vector3();
+      if (data.x === undefined || data.y === undefined || data.z === undefined) {
+        if (!rm) return;
+        rm.group.getWorldPosition(gunTipWorldPos);
+        gunTipWorldPos.y += 0.45; // adjustment near arm height
+      }
+
+      const yaw = data.yaw ?? rm?.group.rotation.y ?? 0;
+      const pitch = data.pitch ?? rm?.head.rotation.x ?? 0;
 
       const endPos = new THREE.Vector3(
-        gunTipWorldPos.x - Math.sin(rm.group.rotation.y) * 45,
-        gunTipWorldPos.y + Math.sin(rm.head.rotation.x) * 45,
-        gunTipWorldPos.z - Math.cos(rm.group.rotation.y) * 45
+        gunTipWorldPos.x - Math.sin(yaw) * 45,
+        gunTipWorldPos.y + Math.sin(pitch) * 45,
+        gunTipWorldPos.z - Math.cos(yaw) * 45
       );
 
       laserGeo.setFromPoints([gunTipWorldPos, endPos]);
@@ -1695,10 +1711,12 @@ export default function App() {
             });
           }
 
-          // Play audio and show hitmarker visual
-          playHitSound();
-          setIsHitmarkerActive(true);
-          setTimeout(() => setIsHitmarkerActive(false), 140);
+          if (activeRoom === 'TREINO') {
+            // Play audio and show hitmarker visual immediately only in local training.
+            playHitSound();
+            setIsHitmarkerActive(true);
+            setTimeout(() => setIsHitmarkerActive(false), 140);
+          }
         } else {
           // Hits walls, boundary margins, columns or custom obstacles! Place a bullet impact decal
           const hitPoint = intersects[0].point;
@@ -1880,6 +1898,20 @@ export default function App() {
       stateRef.current.y = camera.position.y;
       stateRef.current.z = camera.position.z;
       stateRef.current.isShooting = keysPressed.has('KeyF'); // auxiliary shooting flag if mouse click fails
+      const activeSelf = joinedPlayersRef.current[activeLocalPlayerId];
+      if (activeSelf) {
+        joinedPlayersRef.current = {
+          ...joinedPlayersRef.current,
+          [activeLocalPlayerId]: {
+            ...activeSelf,
+            x: stateRef.current.x,
+            y: stateRef.current.y - PLAYER_EYE_HEIGHT,
+            z: stateRef.current.z,
+            yaw: stateRef.current.yaw,
+            pitch: stateRef.current.pitch
+          }
+        };
+      }
 
       // Synchronize player position every rendered frame for lower perceived latency.
       syncThrottleCounter++;

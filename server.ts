@@ -154,6 +154,46 @@ function getMatchState(room: Room) {
   };
 }
 
+function isServerValidatedHit(attacker: Player, victim: Player): boolean {
+  const pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, attacker.pitch));
+  const cosPitch = Math.cos(pitch);
+  const rayOrigin = {
+    x: attacker.x,
+    y: attacker.y + 1.6,
+    z: attacker.z
+  };
+  const rayDir = {
+    x: -Math.sin(attacker.yaw) * cosPitch,
+    y: Math.sin(pitch),
+    z: -Math.cos(attacker.yaw) * cosPitch
+  };
+  const victimCenter = {
+    x: victim.x,
+    y: victim.y + 1.0,
+    z: victim.z
+  };
+
+  const toVictim = {
+    x: victimCenter.x - rayOrigin.x,
+    y: victimCenter.y - rayOrigin.y,
+    z: victimCenter.z - rayOrigin.z
+  };
+  const alongRay = toVictim.x * rayDir.x + toVictim.y * rayDir.y + toVictim.z * rayDir.z;
+  if (alongRay < 0 || alongRay > 55) return false;
+
+  const closest = {
+    x: rayOrigin.x + rayDir.x * alongRay,
+    y: rayOrigin.y + rayDir.y * alongRay,
+    z: rayOrigin.z + rayDir.z * alongRay
+  };
+  const dx = victimCenter.x - closest.x;
+  const dy = victimCenter.y - closest.y;
+  const dz = victimCenter.z - closest.z;
+  const distanceToRay = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+  return distanceToRay <= 0.82;
+}
+
 function emitRoomState(roomCode: string) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -455,9 +495,14 @@ io.on('connection', (socket: Socket) => {
 
     if (!sanitizePlayerSync(player, data)) return;
 
-    io.in(roomCode).emit('players:sync', {
-      players: rooms[roomCode].players,
-      match: getMatchState(rooms[roomCode])
+    socket.to(roomCode).emit('player:sync', {
+      id: socket.id,
+      x: player.x,
+      y: player.y,
+      z: player.z,
+      yaw: player.yaw,
+      pitch: player.pitch,
+      isShooting: player.isShooting
     });
   });
 
@@ -470,7 +515,14 @@ io.on('connection', (socket: Socket) => {
     if (!room || !player?.isActive || room.phase !== 'live') return;
 
     // Broadcast the muzzle flash/laser visual indicator to everyone else
-    socket.to(roomCode).emit('player:shoot', { id: socket.id });
+    socket.to(roomCode).emit('player:shoot', {
+      id: socket.id,
+      x: player.x,
+      y: player.y,
+      z: player.z,
+      yaw: player.yaw,
+      pitch: player.pitch
+    });
   });
 
   // Client-authoritative damage registration (extremely robust for fast web interactions)
@@ -485,6 +537,7 @@ io.on('connection', (socket: Socket) => {
     if (!victim || !attacker) return;
     if (room.phase !== 'live' || !victim.isActive || !attacker.isActive) return;
     if (victim.health <= 0) return; // Already dead
+    if (!isServerValidatedHit(attacker, victim)) return;
 
     // Reduce health
     victim.health = Math.max(0, victim.health - data.damage);
