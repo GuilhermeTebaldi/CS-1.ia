@@ -1,22 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Keyboard, 
   User, 
   Hash, 
   Users, 
   Heart, 
   Tv, 
-  HelpCircle, 
   LogOut, 
   Zap, 
   Copy, 
   Check, 
   Award,
-  CircleDot,
-  Volume2,
-  VolumeX,
   Sliders,
-  RefreshCw,
   Sword,
   Target
 } from 'lucide-react';
@@ -139,6 +133,8 @@ const defaultMatchState: MatchState = {
   activePlayerIds: []
 };
 
+const DEFAULT_SERVER_URL = 'https://cs-1-ia.onrender.com';
+
 export default function App() {
   // Lobby States
   const [inGame, setInGame] = useState(false);
@@ -157,7 +153,8 @@ export default function App() {
   // Server Configuration states (highly robust for external connections e.g. Vercel client connecting to this Cloud Run backend)
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [serverUrl, setServerUrl] = useState(() => {
-    return localStorage.getItem('blocky_fps_server_url') || window.location.origin;
+    const savedUrl = localStorage.getItem('blocky_fps_server_url');
+    return savedUrl && savedUrl !== window.location.origin ? savedUrl : DEFAULT_SERVER_URL;
   });
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
 
@@ -332,6 +329,40 @@ export default function App() {
 
     socket.on('match:state', (data: MatchState) => {
       setMatchState(data);
+    });
+
+    socket.on('player:sync', (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
+      if (data.id === socket.id) {
+        stateRef.current.x = data.x;
+        stateRef.current.y = data.y + 1.6;
+        stateRef.current.z = data.z;
+        const camera = cameraRef.current;
+        if (camera) {
+          const dx = Math.abs(camera.position.x - data.x);
+          const dy = Math.abs(camera.position.y - (data.y + 1.6));
+          const dz = Math.abs(camera.position.z - data.z);
+          if (dx > 0.08 || dy > 0.08 || dz > 0.08) {
+            camera.position.set(data.x, data.y + 1.6, data.z);
+          }
+        }
+      }
+
+      setJoinedPlayers(prev => {
+        const player = prev[data.id];
+        if (!player) return prev;
+        return {
+          ...prev,
+          [data.id]: {
+            ...player,
+            x: data.x,
+            y: data.y,
+            z: data.z,
+            yaw: data.yaw,
+            pitch: data.pitch,
+            isShooting: data.isShooting
+          }
+        };
+      });
     });
 
     socket.on('player:health', (data: { id: string; health: number }) => {
@@ -2039,20 +2070,40 @@ export default function App() {
       
       {/* 1. LOBBY SCREEN OVERLAY */}
       {!inGame ? (
-        <div id="lobby-panel" className="flex-1 flex flex-col items-center justify-center p-6 bg-radial from-slate-900 to-slate-950">
-          
-          <div id="lobby-header-badge" className="mb-6 flex items-center gap-2 bg-slate-800/80 px-4 py-2 rounded-full border border-slate-700 shadow-md">
-            <Sword className="w-5 h-5 text-red-500 animate-pulse" />
-            <span className="text-xs tracking-widest uppercase font-black text-rose-400">FPS Retro-LAN Arena</span>
+        <div id="lobby-panel" className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6 bg-slate-950">
+          <div className="absolute right-4 top-4 flex items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider">
+              <span className={`h-2 w-2 rounded-full ${
+                connectionStatus === 'connected' ? 'bg-emerald-500' :
+                connectionStatus === 'connecting' ? 'bg-amber-500 animate-pulse' :
+                'bg-rose-500 animate-pulse'
+              }`} />
+              <span className={
+                connectionStatus === 'connected' ? 'text-emerald-400' :
+                connectionStatus === 'connecting' ? 'text-amber-400' :
+                'text-rose-400'
+              }>
+                {connectionStatus === 'connected' ? 'Online' :
+                 connectionStatus === 'connecting' ? 'Conectando' :
+                 'Offline'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowServerConfig(!showServerConfig)}
+              className="rounded-lg border border-slate-800 bg-slate-900/80 p-2 text-slate-400 transition-all hover:border-slate-600 hover:text-white"
+              title="Configuração do servidor"
+            >
+              <Tv className="h-4 w-4" />
+            </button>
           </div>
 
-          <div id="lobby-card" className="max-w-md w-full bg-slate-800/60 backdrop-blur-md rounded-2xl border border-slate-700/80 p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-            <div id="lobby-card-gradient" className="absolute -right-16 -top-16 w-44 h-44 rounded-full bg-rose-500/10 blur-3xl" />
-            <div id="lobby-card-gradient2" className="absolute -left-16 -bottom-16 w-44 h-44 rounded-full bg-blue-500/10 blur-3xl" />
-
-            <div id="lobby-intro-title-group" className="text-center mb-6">
-              <h2 className="text-2xl font-black text-white tracking-tight">LAN MULTIPLAYER</h2>
-              <p className="text-slate-400 text-xs mt-1">Crie ou entre em salas privadas instantâneas sem contas</p>
+          <div id="lobby-card" className="max-w-sm w-full bg-slate-900 border border-slate-800 p-5 sm:p-6 shadow-2xl relative">
+            <div id="lobby-intro-title-group" className="mb-5">
+              <div className="flex items-center gap-2">
+                <Sword className="w-5 h-5 text-rose-500" />
+                <h2 className="text-xl font-black text-white tracking-tight uppercase">LAN</h2>
+              </div>
             </div>
 
             {/* ERROR NOTIFICATION PANEL */}
@@ -2064,96 +2115,65 @@ export default function App() {
             )}
 
             {/* FIELD: PLAYER NAME */}
-            <div id="name-field-group" className="space-y-2 mb-4">
-              <label className="text-xs font-bold text-slate-400 tracking-wide flex items-center gap-1.5 uppercase">
-                <User className="w-3.5 h-3.5 text-blue-400" /> Seu Nome / Nickname
+            {showServerConfig && (
+              <div id="server-config-fields" className="mb-4 bg-slate-950 border border-slate-800 p-3 space-y-2.5 animate-fade-in text-left">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
+                  Servidor
+                </label>
+                <input
+                  id="input-server-url"
+                  type="text"
+                  value={serverUrl}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setServerUrl(val);
+                    localStorage.setItem('blocky_fps_server_url', val);
+                  }}
+                  placeholder={DEFAULT_SERVER_URL}
+                  className="w-full bg-slate-900 border border-slate-800 px-3 py-2 text-xs text-indigo-300 font-mono focus:outline-none focus:border-indigo-500 transition-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setServerUrl(DEFAULT_SERVER_URL);
+                    localStorage.removeItem('blocky_fps_server_url');
+                  }}
+                  className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                >
+                  Usar padrão
+                </button>
+              </div>
+            )}
+
+            <div id="name-field-group" className="space-y-2 mb-3">
+              <label className="text-[10px] font-black text-slate-500 tracking-widest flex items-center gap-1.5 uppercase">
+                <User className="w-3.5 h-3.5 text-blue-400" /> Nome
               </label>
               <input
                 id="input-player-name"
                 type="text"
                 value={playerName}
                 onChange={(e) => handleNameChange(e.target.value)}
-                placeholder="Insira seu apelido..."
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 font-semibold focus:outline-none focus:border-blue-500 transition-all shadow-inner"
+                placeholder="Seu nome"
+                className="w-full bg-slate-950 border border-slate-800 px-4 py-3 text-sm text-slate-100 placeholder-slate-600 font-semibold focus:outline-none focus:border-blue-500 transition-all"
               />
             </div>
 
-            {/* FIELD: SERVER CONFIGURATION (Highly useful for custom deployments e.g Vercel/Localhost -> Cloud Run) */}
-            <div id="server-config-group" className="space-y-2 mb-5">
-              <div className="flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowServerConfig(!showServerConfig)}
-                  className="text-[11px] text-slate-400 hover:text-slate-300 font-bold flex items-center gap-1.5 bg-slate-900/45 px-3 py-2 rounded-xl border border-slate-700/50 hover:border-slate-600 transition-all cursor-pointer select-none"
-                >
-                  <Tv className="w-3.5 h-3.5 text-indigo-400" />
-                  {showServerConfig ? 'Ocultar Configurações de Servidor' : 'Mostrar Configurações de Servidor'}
-                </button>
-
-                {/* Live connection status badge */}
-                <div className="flex items-center gap-1.5 bg-slate-900/40 px-2.5 py-1.5 rounded-lg border border-slate-800 text-[10px] uppercase tracking-wider font-semibold">
-                  <span className={`w-2 h-2 rounded-full ${
-                    connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' :
-                    connectionStatus === 'connecting' ? 'bg-amber-500 animate-pulse' :
-                    'bg-rose-500 animate-pulse'
-                  }`} />
-                  <span className={
-                    connectionStatus === 'connected' ? 'text-emerald-400 font-bold' :
-                    connectionStatus === 'connecting' ? 'text-amber-400 font-bold' :
-                    'text-rose-400 font-bold'
-                  }>
-                    {connectionStatus === 'connected' ? 'ONLINE' :
-                     connectionStatus === 'connecting' ? 'CONECTANDO...' :
-                     'ERRO CONEXÃO'}
-                  </span>
-                </div>
-              </div>
-
-              {showServerConfig && (
-                <div id="server-config-fields" className="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-2.5 animate-fade-in text-left">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
-                    Endereço do Servidor (Socket.IO)
-                  </label>
-                  <input
-                    id="input-server-url"
-                    type="text"
-                    value={serverUrl}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setServerUrl(val);
-                      localStorage.setItem('blocky_fps_server_url', val);
-                    }}
-                    placeholder="Ex: https://meu-servidor-fps.run.app"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-indigo-300 font-mono focus:outline-none focus:border-indigo-500 transition-all"
-                  />
-                  <p className="text-[10px] text-slate-500 leading-relaxed font-semibold">
-                    Se estiver jogando em um servidor externo (como Vercel), insira aqui a URL do seu servidor do AI Studio (Cloud Run) para sincronizar. Por padrão, conecta na origem da página (<code className="text-slate-400">{window.location.origin}</code>).
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div id="lobby-divider" className="border-t border-slate-700/60 my-5 relative">
-              <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 bg-slate-800 px-3 text-[10px] font-black text-slate-500 tracking-widest">SALA DE REDE</span>
-            </div>
-
             {/* ACTION DIRECTORS */}
-            <div id="lobby-actions" className="space-y-4">
+            <div id="lobby-actions" className="space-y-3">
               {/* Box: CREATE ROOM */}
               <button
                 id="btn-create-lobby"
                 onClick={createRoom}
-                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 px-5 py-3.5 rounded-xl font-bold text-sm tracking-wide text-white transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 hover:shadow-blue-500/10"
+                className="w-full bg-blue-600 hover:bg-blue-500 px-5 py-4 font-black text-sm tracking-wide text-white transition-all shadow-md active:scale-95 flex items-center justify-center gap-2"
               >
-                <Zap className="w-4 h-4 text-amber-300" /> Criar Nova Sala (Gerar Token)
+                <Zap className="w-4 h-4 text-amber-300" /> Criar LAN
               </button>
-
-              <div id="lobby-mini-spacer" className="text-center text-slate-500 text-xs py-0.5 font-bold">OU entrar por código</div>
 
               {/* BOX: JOIN ROOM */}
               <div id="join-form-wrapper" className="flex gap-2 animate-fade-in">
                 <div className="relative flex-1">
-                  <Hash className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-500" />
+                  <Hash className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-600" />
                   <input
                     id="input-room-token"
                     type="text"
@@ -2161,61 +2181,29 @@ export default function App() {
                     value={roomCodeInput}
                     onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase().trim())}
                     placeholder="TOKEN"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-4 py-3 text-sm text-white font-mono placeholder-slate-600 focus:outline-none focus:border-rose-500 transition-all tracking-wider"
+                    className="w-full bg-slate-950 border border-slate-800 pl-9 pr-4 py-3 text-sm text-white font-mono placeholder-slate-600 focus:outline-none focus:border-rose-500 transition-all tracking-wider"
                   />
                 </div>
                 <button
                   id="btn-join-lobby"
                   onClick={joinRoom}
-                  className="bg-slate-700 hover:bg-slate-600 border border-slate-600 hover:border-slate-500 text-white font-bold text-sm px-6 rounded-xl transition-all active:scale-95 flex items-center justify-center"
+                  className="bg-rose-600 hover:bg-rose-500 text-white font-black text-sm px-6 transition-all active:scale-95 flex items-center justify-center"
                 >
                   Entrar
                 </button>
               </div>
 
-              {/* OFFLINE SANDBOX BACKUP - Perfect for Vercel/External environments */}
-              <div id="lobby-solo-divider" className="border-t border-slate-700/40 pt-1.5 mt-2">
-                <button
-                  id="btn-practice-offline"
-                  type="button"
-                  onClick={startPracticeMode}
-                  className="w-full bg-slate-900/65 hover:bg-slate-900/90 text-slate-300 hover:text-white border border-slate-700/60 hover:border-slate-500/80 px-5 py-3 rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Target className="w-4 h-4 text-rose-500 animate-pulse" /> Jogar Offline (Modo Prática / Alvo)
-                </button>
-              </div>
-            </div>
-
-            {/* CONTROLS INSTRUCTIONS DECK */}
-            <div id="lobby-controls-help" className="mt-6 bg-slate-900/40 border border-slate-700/50 rounded-xl p-4">
-              <h3 className="text-xs font-bold text-slate-300 flex items-center gap-1.5 uppercase mb-2">
-                <Keyboard className="w-3.5 h-3.5 text-rose-400" /> Comandos de Teclado e Mouse:
-              </h3>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-slate-400 font-medium">
-                <div className="flex items-center gap-1.5">
-                  <span className="bg-slate-800 text-slate-300 border border-slate-700 px-1 py-0.5 rounded font-mono text-[9px] font-bold">W,A,S,D</span>
-                  <span>Andar Arena</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="bg-slate-800 text-slate-300 border border-slate-700 px-1 py-0.5 rounded font-mono text-[9px] font-bold">MOUSE</span>
-                  <span>Olhar ao redor</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="bg-slate-800 text-slate-300 border border-slate-700 px-1.5 py-0.5 rounded font-mono text-[9px] font-bold">ESPAÇO</span>
-                  <span>Pular</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="bg-slate-800 text-slate-300 border border-slate-700 px-1.5 py-0.5 rounded font-mono text-[9px] font-bold">CLIQUE ESQ.</span>
-                  <span>Atirar Arma</span>
-                </div>
-              </div>
+              <button
+                id="btn-practice-offline"
+                type="button"
+                onClick={startPracticeMode}
+                className="w-full bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 px-5 py-3 font-black text-xs uppercase tracking-wider transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Target className="w-4 h-4 text-slate-500" /> Treino
+              </button>
             </div>
 
           </div>
-
-          <p id="lobby-credits-footer" className="text-[10px] text-slate-600 font-bold mt-8 tracking-widest uppercase">
-            FPS Multipayer • Servidor local integrado • Tráfego P2P ultra-leve
-          </p>
         </div>
       ) : (
         

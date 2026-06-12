@@ -457,8 +457,8 @@ io.on('connection', (socket: Socket) => {
 
     sanitizePlayerSync(player, data);
 
-    // Broadcast update to other players in the room immediately
-    socket.to(roomCode).emit('player:sync', {
+    // Broadcast the server-authoritative position to everyone, including the sender.
+    io.in(roomCode).emit('player:sync', {
       id: socket.id,
       x: player.x,
       y: player.y,
