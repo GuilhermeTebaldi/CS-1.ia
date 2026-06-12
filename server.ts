@@ -26,13 +26,36 @@ interface Room {
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
+
+// Express CORS middleware to mirror origins and guarantee browser approval
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-requested-with');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
 const httpServer = createServer(app);
 
-// Configure Socket.IO with relaxed CORS so client can connect safely
+// Configure Socket.IO with relaxed, credentials-enabled CORS so client can connect safely
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
+    origin: (origin, callback) => {
+      // Safely mirror the requester origin to fully bypass CORS restrictions
+      callback(null, origin || true);
+    },
     methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 

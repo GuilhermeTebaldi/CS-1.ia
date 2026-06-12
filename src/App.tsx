@@ -229,7 +229,7 @@ export default function App() {
     console.log("🔌 Conectando ao servidor Socket.IO:", cleanedUrl);
     
     const socket = io(cleanedUrl, {
-      transports: ['polling', 'websocket'],
+      transports: ['websocket', 'polling'],
       reconnectionAttempts: 8,
       timeout: 15000
     });
@@ -1720,9 +1720,6 @@ export default function App() {
 
           bot.isShooting = (ai.shootCooldown < 0.1);
         });
-
-        // Trigger react synchronization
-        setJoinedPlayers({ ...joinedPlayersRef.current });
       }
 
       // Synchronize remote player block representation states
