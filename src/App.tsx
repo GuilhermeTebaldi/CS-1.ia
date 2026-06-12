@@ -124,6 +124,7 @@ export default function App() {
   const [serverUrl, setServerUrl] = useState(() => {
     return localStorage.getItem('blocky_fps_server_url') || window.location.origin;
   });
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
 
   // Gameplay HUD states
   const [localHealth, setLocalHealth] = useState(100);
@@ -170,6 +171,7 @@ export default function App() {
 
   // Socket setup (only during connection setups)
   useEffect(() => {
+    setConnectionStatus('connecting');
     // clean up any trailing slash to avoid connection errors, default to origin space
     const cleanedUrl = serverUrl ? serverUrl.trim().replace(/\/$/, "") : window.location.origin;
     console.log("🔌 Conectando ao servidor Socket.IO:", cleanedUrl);
@@ -181,8 +183,21 @@ export default function App() {
     });
     socketRef.current = socket;
 
-    socket.on('connect_error', () => {
-      setJoinError('Conexão ao servidor falhou. Verifique se o endereço do servidor está correto e online.');
+    socket.on('connect', () => {
+      console.log("🔌 Conectado ao socket com ID:", socket.id);
+      setConnectionStatus('connected');
+      setJoinError('');
+    });
+
+    socket.on('disconnect', () => {
+      console.log("🔌 Desconectado do socket.");
+      setConnectionStatus('disconnected');
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error("🔌 Erro na conexão socket:", err);
+      setConnectionStatus('error');
+      setJoinError('Conexão ao servidor falhou. Verifique se o endereço do servidor está correto e ativo.');
     });
 
     socket.on('room:joined', (data: { success: boolean; roomCode: string; playerId: string; players: Record<string, PlayerState>; error?: string }) => {
@@ -947,14 +962,34 @@ export default function App() {
 
             {/* FIELD: SERVER CONFIGURATION (Highly useful for custom deployments e.g Vercel/Localhost -> Cloud Run) */}
             <div id="server-config-group" className="space-y-2 mb-5">
-              <button
-                type="button"
-                onClick={() => setShowServerConfig(!showServerConfig)}
-                className="text-[11px] text-slate-400 hover:text-slate-300 font-bold flex items-center gap-1.5 bg-slate-900/45 px-3 py-2 rounded-xl border border-slate-700/50 hover:border-slate-600 transition-all cursor-pointer select-none"
-              >
-                <Tv className="w-3.5 h-3.5 text-indigo-400" />
-                {showServerConfig ? 'Ocultar Configurações de Servidor' : 'Mostrar Configurações de Servidor'}
-              </button>
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowServerConfig(!showServerConfig)}
+                  className="text-[11px] text-slate-400 hover:text-slate-300 font-bold flex items-center gap-1.5 bg-slate-900/45 px-3 py-2 rounded-xl border border-slate-700/50 hover:border-slate-600 transition-all cursor-pointer select-none"
+                >
+                  <Tv className="w-3.5 h-3.5 text-indigo-400" />
+                  {showServerConfig ? 'Ocultar Configurações de Servidor' : 'Mostrar Configurações de Servidor'}
+                </button>
+
+                {/* Live connection status badge */}
+                <div className="flex items-center gap-1.5 bg-slate-900/40 px-2.5 py-1.5 rounded-lg border border-slate-800 text-[10px] uppercase tracking-wider font-semibold">
+                  <span className={`w-2 h-2 rounded-full ${
+                    connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' :
+                    connectionStatus === 'connecting' ? 'bg-amber-500 animate-pulse' :
+                    'bg-rose-500 animate-pulse'
+                  }`} />
+                  <span className={
+                    connectionStatus === 'connected' ? 'text-emerald-400 font-bold' :
+                    connectionStatus === 'connecting' ? 'text-amber-400 font-bold' :
+                    'text-rose-400 font-bold'
+                  }>
+                    {connectionStatus === 'connected' ? 'ONLINE' :
+                     connectionStatus === 'connecting' ? 'CONECTANDO...' :
+                     'ERRO CONEXÃO'}
+                  </span>
+                </div>
+              </div>
 
               {showServerConfig && (
                 <div id="server-config-fields" className="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-2.5 animate-fade-in text-left">
