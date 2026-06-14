@@ -20,11 +20,25 @@ interface Player {
   kills: number;
   deaths: number;
   lastInputAt: number;
+  lastProcessedInputSequence: number;
   inputMoveX: number;
   inputMoveZ: number;
   inputYaw: number;
   inputPitch: number;
   inputShooting: boolean;
+  velocityX: number;
+  velocityZ: number;
+  inputQueue: PlayerInput[];
+}
+
+interface PlayerInput {
+  sequenceNumber: number;
+  moveX: number;
+  moveZ: number;
+  yaw: number;
+  pitch: number;
+  isShooting?: boolean;
+  clientTime?: number;
 }
 
 interface PlayerSnapshot {
@@ -55,7 +69,6 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
 
 const ARENA_LIMIT = 29.8;
-const MAX_PLAYER_Y = 8;
 const SERVER_SYNC_LIMIT = 30.25;
 const PLAYER_RADIUS = 0.45;
 const MOVE_SPEED = 7.5;
@@ -153,21 +166,6 @@ function getSpawnPoint(room?: Room): { x: number; y: number; z: number } {
   return { ...point };
 }
 
-function sanitizePlayerSync(player: Player, data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }): boolean {
-  if (![data.x, data.y, data.z, data.yaw, data.pitch].every(Number.isFinite)) {
-    return false;
-  }
-
-  player.x = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, data.x));
-  player.y = Math.max(0, Math.min(MAX_PLAYER_Y, data.y));
-  player.z = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, data.z));
-  player.yaw = data.yaw;
-  player.pitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
-  player.isShooting = Boolean(data.isShooting);
-
-  return true;
-}
-
 function isBlockedXZ(x: number, z: number): boolean {
   if (x < -ARENA_LIMIT || x > ARENA_LIMIT || z < -ARENA_LIMIT || z > ARENA_LIMIT) {
     return true;
@@ -180,24 +178,51 @@ function isBlockedXZ(x: number, z: number): boolean {
   });
 }
 
-function storePlayerInput(player: Player, data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }, now = Date.now()) {
+function storePlayerInput(player: Player, data: { sequenceNumber?: number; moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean; clientTime?: number }, now = Date.now()) {
   if (![data.moveX, data.moveZ, data.yaw, data.pitch].every(Number.isFinite)) {
     return false;
   }
 
+  const sequenceNumber = Number.isFinite(data.sequenceNumber)
+    ? Math.max(0, Math.floor(data.sequenceNumber || 0))
+    : player.lastProcessedInputSequence + 1;
+  if (sequenceNumber <= player.lastProcessedInputSequence || player.inputQueue.some((input) => input.sequenceNumber === sequenceNumber)) {
+    return false;
+  }
+
   player.lastInputAt = now;
-  player.inputMoveX = Math.max(-1, Math.min(1, data.moveX));
-  player.inputMoveZ = Math.max(-1, Math.min(1, data.moveZ));
-  player.inputYaw = data.yaw;
-  player.inputPitch = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch));
-  player.inputShooting = Boolean(data.isShooting);
+  player.inputQueue.push({
+    sequenceNumber,
+    moveX: Math.max(-1, Math.min(1, data.moveX)),
+    moveZ: Math.max(-1, Math.min(1, data.moveZ)),
+    yaw: data.yaw,
+    pitch: Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, data.pitch)),
+    isShooting: Boolean(data.isShooting),
+    clientTime: data.clientTime
+  });
+  player.inputQueue.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+  if (player.inputQueue.length > 24) {
+    player.inputQueue.splice(0, player.inputQueue.length - 24);
+  }
   return true;
 }
 
 function simulatePlayerTick(player: Player, dt: number) {
+  while (player.inputQueue.length > 0) {
+    const input = player.inputQueue.shift()!;
+    player.inputMoveX = input.moveX;
+    player.inputMoveZ = input.moveZ;
+    player.inputYaw = input.yaw;
+    player.inputPitch = input.pitch;
+    player.inputShooting = Boolean(input.isShooting);
+    player.lastProcessedInputSequence = input.sequenceNumber;
+  }
+
   player.yaw = player.inputYaw;
   player.pitch = player.inputPitch;
   player.isShooting = player.inputShooting;
+  player.velocityX = 0;
+  player.velocityZ = 0;
 
   const inputLen = Math.hypot(player.inputMoveX, player.inputMoveZ);
   if (inputLen <= 0.001 || dt <= 0) return true;
@@ -215,6 +240,8 @@ function simulatePlayerTick(player: Player, dt: number) {
 
   const dx = (right.x * moveX + forward.x * -moveZ) * MOVE_SPEED * dt;
   const dz = (right.z * moveX + forward.z * -moveZ) * MOVE_SPEED * dt;
+  player.velocityX = dt > 0 ? dx / dt : 0;
+  player.velocityZ = dt > 0 ? dz / dt : 0;
   const nextX = Math.max(-SERVER_SYNC_LIMIT, Math.min(SERVER_SYNC_LIMIT, player.x + dx));
   if (!isBlockedXZ(nextX, player.z)) {
     player.x = nextX;
@@ -435,6 +462,10 @@ function setActiveDuel(room: Room, activeIds: string[]) {
       player.inputYaw = player.yaw;
       player.inputPitch = 0;
       player.inputShooting = false;
+      player.velocityX = 0;
+      player.velocityZ = 0;
+      player.inputQueue = [];
+      player.lastProcessedInputSequence = 0;
       player.lastInputAt = Date.now();
       room.history[player.id] = [];
       recordPlayerSnapshot(room, player);
@@ -585,20 +616,30 @@ function removePlayerFromRoom(socket: Socket) {
 }
 
 let lastServerTickAt = Date.now();
+let serverTick = 0;
+let serverTickAccumulator = 0;
+const SERVER_FIXED_DT = 1 / SERVER_TICK_HZ;
 setInterval(() => {
   const now = Date.now();
-  const dt = Math.min(1 / 20, Math.max(0, (now - lastServerTickAt) / 1000));
+  serverTickAccumulator += Math.min(0.25, Math.max(0, (now - lastServerTickAt) / 1000));
   lastServerTickAt = now;
+  let steps = 0;
 
-  Object.values(rooms).forEach((room) => {
-    if (room.phase !== 'live') return;
-    room.activePlayerIds.forEach((playerId) => {
-      const player = room.players[playerId];
-      if (!player || !player.isActive || player.health <= 0) return;
-      simulatePlayerTick(player, dt);
-      recordPlayerSnapshot(room, player, now);
+  while (serverTickAccumulator >= SERVER_FIXED_DT && steps < 5) {
+    serverTickAccumulator -= SERVER_FIXED_DT;
+    serverTick += 1;
+
+    Object.values(rooms).forEach((room) => {
+      if (room.phase !== 'live') return;
+      room.activePlayerIds.forEach((playerId) => {
+        const player = room.players[playerId];
+        if (!player || !player.isActive || player.health <= 0) return;
+        simulatePlayerTick(player, SERVER_FIXED_DT);
+        recordPlayerSnapshot(room, player, now);
+      });
     });
-  });
+    steps += 1;
+  }
 }, 1000 / SERVER_TICK_HZ);
 
 setInterval(() => {
@@ -614,7 +655,11 @@ setInterval(() => {
         z: player.z,
         yaw: player.yaw,
         pitch: player.pitch,
-        isShooting: player.isShooting
+        isShooting: player.isShooting,
+        velocityX: player.velocityX,
+        velocityZ: player.velocityZ,
+        serverTick,
+        lastProcessedInputSequence: player.lastProcessedInputSequence
       });
     });
   });
@@ -659,11 +704,15 @@ io.on('connection', (socket: Socket) => {
           kills: 0,
           deaths: 0,
           lastInputAt: Date.now(),
+          lastProcessedInputSequence: 0,
           inputMoveX: 0,
           inputMoveZ: 0,
           inputYaw: 0,
           inputPitch: 0,
-          inputShooting: false
+          inputShooting: false,
+          velocityX: 0,
+          velocityZ: 0,
+          inputQueue: []
         }
       }
     };
@@ -716,11 +765,15 @@ io.on('connection', (socket: Socket) => {
       kills: 0,
       deaths: 0,
       lastInputAt: Date.now(),
+      lastProcessedInputSequence: 0,
       inputMoveX: 0,
       inputMoveZ: 0,
       inputYaw: 0,
       inputPitch: 0,
-      inputShooting: false
+      inputShooting: false,
+      velocityX: 0,
+      velocityZ: 0,
+      inputQueue: []
     };
 
     room.players[socket.id] = newPlayer;
@@ -749,7 +802,7 @@ io.on('connection', (socket: Socket) => {
   });
 
   // CS-style: client sends movement intent, server owns the official position.
-  socket.on('player:input', (data: { moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }) => {
+  socket.on('player:input', (data: { sequenceNumber?: number; clientTime?: number; moveX: number; moveZ: number; yaw: number; pitch: number; isShooting?: boolean }) => {
     const roomCode = socketToRoom[socket.id];
     if (!roomCode || !rooms[roomCode]) return;
 
@@ -761,7 +814,7 @@ io.on('connection', (socket: Socket) => {
     storePlayerInput(player, data);
   });
 
-  // Compatibility while old clients finish deploying.
+  // Legacy clients may still emit this, but positions are server-authoritative.
   socket.on('player:sync', (data: { x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
     const roomCode = socketToRoom[socket.id];
     if (!roomCode || !rooms[roomCode]) return;
@@ -770,9 +823,13 @@ io.on('connection', (socket: Socket) => {
     const player = room.players[socket.id];
     if (!player) return;
     if (!player.isActive || room.phase !== 'live') return;
-
-    if (!sanitizePlayerSync(player, data)) return;
-    recordPlayerSnapshot(room, player);
+    storePlayerInput(player, {
+      moveX: 0,
+      moveZ: 0,
+      yaw: data.yaw,
+      pitch: data.pitch,
+      isShooting: data.isShooting
+    });
   });
 
   // Handle shooting trigger visual events
@@ -843,6 +900,10 @@ io.on('connection', (socket: Socket) => {
     player.inputYaw = 0;
     player.inputPitch = 0;
     player.inputShooting = false;
+    player.velocityX = 0;
+    player.velocityZ = 0;
+    player.inputQueue = [];
+    player.lastProcessedInputSequence = 0;
     player.lastInputAt = Date.now();
     room.history[player.id] = [];
     recordPlayerSnapshot(room, player);

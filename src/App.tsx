@@ -138,10 +138,38 @@ const ARENA_LIMIT = 29.8;
 const PLAYER_RADIUS = 0.45;
 const PLAYER_EYE_HEIGHT = 1.6;
 const REMOTE_SMOOTHING = 0.55;
-const REMOTE_EXTRAPOLATION_MS = 120;
+const REMOTE_INTERPOLATION_DELAY_MS = 100;
+const REMOTE_SNAPSHOT_BUFFER_LIMIT = 12;
+const LOCAL_RECONCILE_SMOOTHING = 0.18;
+const LOCAL_RECONCILE_SNAP_DISTANCE = 3.5;
+const LOCAL_RECONCILE_IGNORE_DISTANCE = 0.025;
 
 type NetworkPlayerState = PlayerState & {
   __receivedAt?: number;
+  __snapshotBuffer?: RemoteSnapshot[];
+};
+
+type RemoteSnapshot = {
+  receivedAt: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  isShooting: boolean;
+};
+
+type AuthoritativePlayerSnapshot = RemoteSnapshot & {
+  lastProcessedInputSequence: number;
+};
+
+type PendingInputCommand = {
+  sequenceNumber: number;
+  moveX: number;
+  moveZ: number;
+  yaw: number;
+  pitch: number;
+  dt: number;
 };
 
 const OBSTACLE_SPECS: { size: [number, number, number]; pos: [number, number, number]; color: string }[] = [];
@@ -262,6 +290,9 @@ export default function App() {
   const isLoopingRef = useRef(false);
   const handleRespawnRef = useRef<() => void>();
   const lastRemoteStateRenderRef = useRef(0);
+  const nextInputSequenceRef = useRef(1);
+  const pendingInputsRef = useRef<PendingInputCommand[]>([]);
+  const latestAuthoritativeSelfRef = useRef<AuthoritativePlayerSnapshot | null>(null);
 
   // Update client-side local health representation
   useEffect(() => {
@@ -320,6 +351,9 @@ export default function App() {
         }
         setLocalPlayerId(data.playerId);
         localPlayerIdRef.current = data.playerId;
+        nextInputSequenceRef.current = 1;
+        pendingInputsRef.current = [];
+        latestAuthoritativeSelfRef.current = null;
         setCurrentRoom(data.roomCode);
         currentRoomRef.current = data.roomCode;
         setJoinedPlayers(data.players);
@@ -386,14 +420,46 @@ export default function App() {
       setMatchState(data);
     });
 
-    const applySyncedPlayer = (data: { id: string; x: number; y: number; z: number; yaw: number; pitch: number; isShooting: boolean }) => {
+    const applySyncedPlayer = (data: {
+      id: string;
+      x: number;
+      y: number;
+      z: number;
+      yaw: number;
+      pitch: number;
+      isShooting: boolean;
+      lastProcessedInputSequence?: number;
+    }) => {
       if (currentRoomRef.current === 'TREINO') return;
       if (data.id === socket.id) {
+        latestAuthoritativeSelfRef.current = {
+          receivedAt: performance.now(),
+          x: data.x,
+          y: data.y,
+          z: data.z,
+          yaw: data.yaw,
+          pitch: data.pitch,
+          isShooting: data.isShooting,
+          lastProcessedInputSequence: data.lastProcessedInputSequence ?? 0
+        };
         return;
       }
       const player = joinedPlayersRef.current[data.id];
       if (!player) return;
       const receivedAt = performance.now();
+      const previousBuffer = (player as NetworkPlayerState).__snapshotBuffer || [];
+      const snapshotBuffer = [
+        ...previousBuffer,
+        {
+          receivedAt,
+          x: data.x,
+          y: data.y,
+          z: data.z,
+          yaw: data.yaw,
+          pitch: data.pitch,
+          isShooting: data.isShooting
+        }
+      ].slice(-REMOTE_SNAPSHOT_BUFFER_LIMIT);
       const nextPlayers = {
         ...joinedPlayersRef.current,
         [data.id]: {
@@ -404,7 +470,8 @@ export default function App() {
           yaw: data.yaw,
           pitch: data.pitch,
           isShooting: data.isShooting,
-          __receivedAt: receivedAt
+          __receivedAt: receivedAt,
+          __snapshotBuffer: snapshotBuffer
         } as NetworkPlayerState
       };
       joinedPlayersRef.current = nextPlayers;
@@ -486,6 +553,9 @@ export default function App() {
         cameraRef.current?.rotation.set(0, 0, 0);
         stateRef.current.vy = 0;
         stateRef.current.isGrounded = true;
+        nextInputSequenceRef.current = 1;
+        pendingInputsRef.current = [];
+        latestAuthoritativeSelfRef.current = null;
         setIsDead(false);
         isDeadRef.current = false;
         setShowDeathMenu(false);
@@ -547,6 +617,9 @@ export default function App() {
     stateRef.current.isGrounded = true;
     stateRef.current.isShooting = false;
     stateRef.current.health = 100;
+    nextInputSequenceRef.current = 1;
+    pendingInputsRef.current = [];
+    latestAuthoritativeSelfRef.current = null;
     cameraRef.current?.position.set(spawn.x, spawn.y, spawn.z);
     cameraRef.current?.rotation.set(0, 0, 0);
     setLocalHealth(100);
@@ -591,6 +664,9 @@ export default function App() {
     stateRef.current.vy = 0;
     stateRef.current.yaw = 0;
     stateRef.current.pitch = 0;
+    nextInputSequenceRef.current = 1;
+    pendingInputsRef.current = [];
+    latestAuthoritativeSelfRef.current = null;
     
     // Revive bots in training
     if (currentRoomRef.current === 'TREINO') {
@@ -1397,22 +1473,45 @@ export default function App() {
         const rm = remotePlayersMeshes[id];
         rm.group.visible = true;
         const nowMs = performance.now();
-        const snapshotPosition = new THREE.Vector3(p.x, p.y + 0.595, p.z);
-        const receivedAt = p.__receivedAt || nowMs;
-        if (receivedAt !== rm.lastReceivedAt) {
-          const snapshotDt = Math.max(0.016, (receivedAt - rm.lastSnapshotAt) / 1000);
-          const measuredVelocity = snapshotPosition.clone().sub(rm.lastSnapshotPosition).divideScalar(snapshotDt);
-          measuredVelocity.clampLength(0, 9);
-          rm.velocity.lerp(measuredVelocity, 0.65);
-          rm.lastSnapshotPosition.copy(snapshotPosition);
-          rm.lastSnapshotAt = receivedAt;
-          rm.lastReceivedAt = receivedAt;
+        const snapshots = p.__snapshotBuffer || [];
+        const renderTime = nowMs - REMOTE_INTERPOLATION_DELAY_MS;
+        let fromSnapshot: RemoteSnapshot | undefined;
+        let toSnapshot: RemoteSnapshot | undefined;
+
+        for (let i = 0; i < snapshots.length - 1; i++) {
+          const current = snapshots[i];
+          const next = snapshots[i + 1];
+          if (current.receivedAt <= renderTime && next.receivedAt >= renderTime) {
+            fromSnapshot = current;
+            toSnapshot = next;
+            break;
+          }
         }
 
-        const extrapolationSeconds = Math.min((nowMs - rm.lastSnapshotAt) / 1000, REMOTE_EXTRAPOLATION_MS / 1000);
-        rm.targetPosition.copy(rm.lastSnapshotPosition).addScaledVector(rm.velocity, extrapolationSeconds);
-        rm.targetYaw = p.yaw;
-        rm.targetPitch = p.pitch;
+        if (!fromSnapshot && snapshots.length > 0) {
+          fromSnapshot = snapshots[Math.max(0, snapshots.length - 2)];
+          toSnapshot = snapshots[snapshots.length - 1];
+        }
+
+        if (fromSnapshot && toSnapshot && fromSnapshot !== toSnapshot) {
+          const range = Math.max(1, toSnapshot.receivedAt - fromSnapshot.receivedAt);
+          const alpha = Math.max(0, Math.min(1, (renderTime - fromSnapshot.receivedAt) / range));
+          rm.targetPosition.set(
+            THREE.MathUtils.lerp(fromSnapshot.x, toSnapshot.x, alpha),
+            THREE.MathUtils.lerp(fromSnapshot.y + 0.595, toSnapshot.y + 0.595, alpha),
+            THREE.MathUtils.lerp(fromSnapshot.z, toSnapshot.z, alpha)
+          );
+          rm.targetYaw = THREE.MathUtils.lerp(fromSnapshot.yaw, toSnapshot.yaw, alpha);
+          rm.targetPitch = THREE.MathUtils.lerp(fromSnapshot.pitch, toSnapshot.pitch, alpha);
+        } else if (fromSnapshot) {
+          rm.targetPosition.set(fromSnapshot.x, fromSnapshot.y + 0.595, fromSnapshot.z);
+          rm.targetYaw = fromSnapshot.yaw;
+          rm.targetPitch = fromSnapshot.pitch;
+        } else {
+          rm.targetPosition.set(p.x, p.y + 0.595, p.z);
+          rm.targetYaw = p.yaw;
+          rm.targetPitch = p.pitch;
+        }
 
         if (rm.group.position.distanceTo(rm.targetPosition) > 4) {
           rm.group.position.copy(rm.targetPosition);
@@ -1711,7 +1810,8 @@ export default function App() {
 
     // 8. Core Animation Physics and Networking Update loops
     let lastTime = performance.now();
-    let syncThrottleCounter = 0;
+    let inputSendAccumulator = 0;
+    const inputSendInterval = 1 / 30;
 
     const playerBoxAt = (x: number, y: number, z: number) => new THREE.Box3(
       new THREE.Vector3(x - PLAYER_RADIUS, y - PLAYER_EYE_HEIGHT, z - PLAYER_RADIUS),
@@ -1726,6 +1826,32 @@ export default function App() {
       return !obstacles.some((item) => box.intersectsBox(item.box));
     };
 
+    const applyPlanarMove = (position: THREE.Vector3, input: Pick<PendingInputCommand, 'moveX' | 'moveZ' | 'yaw' | 'dt'>) => {
+      const moveVector = new THREE.Vector3(input.moveX, 0, input.moveZ);
+      if (moveVector.lengthSq() <= 0.0001 || input.dt <= 0) return position;
+
+      moveVector.normalize();
+      const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), input.yaw).normalize();
+      const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), input.yaw).normalize();
+      const displacement = new THREE.Vector3()
+        .addScaledVector(forward, -moveVector.z)
+        .addScaledVector(right, moveVector.x)
+        .normalize()
+        .multiplyScalar(7.5 * input.dt);
+
+      const nextX = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, position.x + displacement.x));
+      if (canStandAt(nextX, position.y, position.z)) {
+        position.x = nextX;
+      }
+
+      const nextZ = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, position.z + displacement.z));
+      if (canStandAt(position.x, position.y, nextZ)) {
+        position.z = nextZ;
+      }
+
+      return position;
+    };
+
     const gameLoop = () => {
       if (!isLoopingRef.current) return;
       const now = performance.now();
@@ -1738,6 +1864,36 @@ export default function App() {
       const roundIsLive = activeRoom === 'TREINO' || (matchStateRef.current.phase === 'live' && localPlayerState?.isActive);
       let networkMoveX = 0;
       let networkMoveZ = 0;
+
+      const authoritativeSelf = latestAuthoritativeSelfRef.current;
+      if (authoritativeSelf && activeRoom !== 'TREINO' && camera) {
+        latestAuthoritativeSelfRef.current = null;
+        pendingInputsRef.current = pendingInputsRef.current.filter(
+          (input) => input.sequenceNumber > authoritativeSelf.lastProcessedInputSequence
+        );
+
+        const reconciledPosition = new THREE.Vector3(
+          authoritativeSelf.x,
+          camera.position.y,
+          authoritativeSelf.z
+        );
+        pendingInputsRef.current.forEach((input) => {
+          applyPlanarMove(reconciledPosition, input);
+        });
+
+        const planarError = Math.hypot(
+          reconciledPosition.x - camera.position.x,
+          reconciledPosition.z - camera.position.z
+        );
+
+        if (planarError > LOCAL_RECONCILE_SNAP_DISTANCE) {
+          camera.position.x = reconciledPosition.x;
+          camera.position.z = reconciledPosition.z;
+        } else if (planarError > LOCAL_RECONCILE_IGNORE_DISTANCE) {
+          camera.position.x = THREE.MathUtils.lerp(camera.position.x, reconciledPosition.x, LOCAL_RECONCILE_SMOOTHING);
+          camera.position.z = THREE.MathUtils.lerp(camera.position.z, reconciledPosition.z, LOCAL_RECONCILE_SMOOTHING);
+        }
+      }
 
       if (stateRef.current.health > 0) {
         // Player locomotion physics (Keyboard reading WASD status)
@@ -1764,24 +1920,16 @@ export default function App() {
         translationForce.addScaledVector(right, moveVector.x);
         translationForce.normalize();
 
-        // Speed definitions
-        const speed = 7.5;
-        const finalDisplacement = translationForce.multiplyScalar(speed * dt);
-
         if (!canStandAt(camera.position.x, camera.position.y, camera.position.z)) {
           camera.position.set(PRACTICE_SPAWN.x, PRACTICE_SPAWN.y, PRACTICE_SPAWN.z);
         }
 
-        // Axis-separated movement: keep the old coordinate on blocked axes and still allow wall sliding.
-        const nextX = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, camera.position.x + finalDisplacement.x));
-        if (canStandAt(nextX, camera.position.y, camera.position.z)) {
-          camera.position.x = nextX;
-        }
-
-        const nextZ = Math.max(-ARENA_LIMIT, Math.min(ARENA_LIMIT, camera.position.z + finalDisplacement.z));
-        if (canStandAt(camera.position.x, camera.position.y, nextZ)) {
-          camera.position.z = nextZ;
-        }
+        applyPlanarMove(camera.position, {
+          moveX: networkMoveX,
+          moveZ: networkMoveZ,
+          yaw: currentYaw,
+          dt
+        });
 
         // Leaping Jumping Mechanics and downward gravity
         const gravity = -26.0;
@@ -1895,15 +2043,31 @@ export default function App() {
         };
       }
 
-      // Send movement intent; server simulates the official position.
-      syncThrottleCounter++;
-      if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && syncThrottleCounter >= 1) {
-        syncThrottleCounter = 0;
-        socketRef.current?.emit('player:input', {
+      // Send movement intent on a fixed cadence; render FPS stays independent.
+      inputSendAccumulator += dt;
+      if (roundIsLive && activeRoom !== 'TREINO' && socketRef.current?.connected && inputSendAccumulator >= inputSendInterval) {
+        const inputDt = Math.min(inputSendAccumulator, 0.1);
+        inputSendAccumulator = 0;
+        const sequenceNumber = nextInputSequenceRef.current++;
+        const inputCommand: PendingInputCommand = {
+          sequenceNumber,
           moveX: networkMoveX,
           moveZ: networkMoveZ,
           yaw: stateRef.current.yaw,
           pitch: stateRef.current.pitch,
+          dt: inputDt
+        };
+        pendingInputsRef.current.push(inputCommand);
+        if (pendingInputsRef.current.length > 90) {
+          pendingInputsRef.current.splice(0, pendingInputsRef.current.length - 90);
+        }
+        socketRef.current.emit('player:input', {
+          sequenceNumber,
+          clientTime: performance.now(),
+          moveX: inputCommand.moveX,
+          moveZ: inputCommand.moveZ,
+          yaw: inputCommand.yaw,
+          pitch: inputCommand.pitch,
           isShooting: false
         });
       }
